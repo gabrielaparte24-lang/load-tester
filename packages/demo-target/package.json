@@ -1,0 +1,17 @@
+{
+  "name": "@lt/demo-target",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    }
+  },
+  "dependencies": {
+    "@lt/core": "0.1.0"
+  }
+}
