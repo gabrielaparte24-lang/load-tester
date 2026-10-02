@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# estado local (nunca versionar)
+.env
+data/
+reports/
+logs/
+run/
+
+# SO / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
