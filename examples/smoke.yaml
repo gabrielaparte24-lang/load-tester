@@ -1,0 +1,18 @@
+# Smoke test: poucas requisições para confirmar que o alvo responde.
+# Rode o alvo de demonstração antes: npm start -- --with-demo
+name: smoke-demo
+description: Verificação rápida do demo-target
+target:
+  baseUrl: http://127.0.0.1:4100
+  timeoutMs: 5000
+load:
+  model: open
+  stages:
+    - { duration: 10s, rps: 20 }
+thresholds:
+  - "p95 < 200ms"
+  - "errorRate < 1%"
+flow:
+  - name: fast
+    request: { method: GET, path: /fast }
+    expect: { status: 200 }

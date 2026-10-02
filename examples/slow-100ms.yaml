@@ -1,0 +1,18 @@
+# Validação da ferramenta: latência conhecida de 100 ms no alvo.
+# Esperado: p50 ≈ p99 ≈ 100 ms (+ ~1 ms de rede local) e taxa enviada ±2% da pedida.
+name: validate-slow-100ms
+target:
+  baseUrl: http://127.0.0.1:4100
+load:
+  model: open
+  warmup: 2s
+  stages:
+    - { duration: 2s, rps: 100 }
+    - { duration: 20s, rps: 100 }
+thresholds:
+  - "p50 < 105ms"
+  - "p99 < 115ms"
+  - "errorRate == 0%"
+flow:
+  - name: slow
+    request: { method: GET, path: /slow, query: { ms: 100 } }

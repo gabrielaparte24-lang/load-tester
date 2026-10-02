@@ -1,0 +1,24 @@
+# Rampa de carga com aquecimento, platô e thresholds (modelo aberto).
+name: ramp-demo
+target:
+  baseUrl: http://127.0.0.1:4100
+  headers: { X-Client: lt }
+  timeoutMs: 3000
+load:
+  model: open
+  warmup: 5s
+  stages:
+    - { duration: 5s, rps: 50 } # aquecimento (descartado)
+    - { duration: 20s, rps: 50 -> 300 } # rampa
+    - { duration: 20s, rps: 300 } # platô
+thresholds:
+  - "p95 < 300ms"
+  - "p99 < 800ms"
+  - "errorRate < 1%"
+flow:
+  - name: listar produtos
+    request: { method: GET, path: /products, query: { page: 1 } }
+    expect: { status: 200 }
+  - name: detalhe
+    request: { method: GET, path: /products/7 }
+    expect: { status: 200, maxDuration: 500ms }
