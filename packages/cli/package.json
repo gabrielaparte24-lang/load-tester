@@ -1,0 +1,13 @@
+{
+  "name": "@lt/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "lt": "./bin/lt.js"
+  },
+  "dependencies": {
+    "@lt/core": "0.1.0",
+    "commander": "15.0.0"
+  }
+}
