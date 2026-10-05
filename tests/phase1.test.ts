@@ -279,8 +279,13 @@ describe("schema e exemplos", () => {
   it("todos os cenários em examples/ são válidos", () => {
     process.env.LT_API_TOKEN ??= "teste";
     const dir = path.join(ROOT, "examples");
-    const files = fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f) && !f.startsWith("ci"));
-    expect(files.length).toBeGreaterThan(3);
-    for (const f of files) expect(() => loadScenarioFile(path.join(dir, f)), f).not.toThrow();
+    const files = ["", "perfis"].flatMap((sub) =>
+      fs
+        .readdirSync(path.join(dir, sub))
+        .filter((f) => /\.ya?ml$/.test(f) && !f.startsWith("ci"))
+        .map((f) => path.join(dir, sub, f)),
+    );
+    expect(files.length).toBeGreaterThan(10);
+    for (const f of files) expect(() => loadScenarioFile(f), f).not.toThrow();
   });
 });

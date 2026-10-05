@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../../schema/scenario.schema.json
+# Perfil "soak" — Soak: carga moderada por muito tempo para achar vazamentos e degradação lenta
+# Acompanhe a latência e a memória (cpu/memPct na linha do tempo) ao longo das horas.
+# Durações acima de LT_MAX_DURATION (padrão 2h) exigem ajustar o .env.
+name: "soak"
+description: "Soak: carga moderada por muito tempo para achar vazamentos e degradação lenta"
+target:
+  baseUrl: http://127.0.0.1:4100
+  timeoutMs: 10000
+load:
+  model: open
+  warmup: 2m
+  stages:
+    - { duration: 2m, rps: 5 -> 50 }
+    - { duration: 1h, rps: 50 }
+thresholds:
+  - "p95 < 300ms"
+  - "p99 < 1s"
+  - "errorRate < 0.5%"
+flow:
+  - name: requisição principal
+    request: { method: GET, path: /fast }
+    expect: { status: 200 }

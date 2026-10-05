@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
+# Modelo fechado: N usuários virtuais (VUs) em laço. Útil para simular sessões de usuários;
+# para medir latência sob carga prefira o modelo aberto (veja README, "Modelo aberto × fechado").
+# Com `pacing`, cada VU começa uma iteração a cada 1 s; se o alvo atrasar, a latência conta desde o
+# horário previsto (corrige a omissão coordenada).
+name: usuarios-virtuais
+target:
+  baseUrl: http://127.0.0.1:4100
+load:
+  model: closed
+  pacing: 1s
+  stages:
+    - { duration: 10s, vus: 0 -> 30 } # entrada gradual
+    - { duration: 30s, vus: 30 }
+    - { duration: 10s, vus: 30 -> 0 }
+thresholds:
+  - "p95 < 400ms"
+  - "errorRate < 1%"
+flow:
+  - name: listar
+    request: { method: GET, path: /products, query: { page: "${randInt(1, 10)}" } }
+    expect: { status: 200 }
+    extract: { id: "$.items[0].id" }
+    think: 200ms..600ms
+  - name: detalhe
+    request: { method: GET, path: "/products/${id}" }
+    expect: { status: 200 }

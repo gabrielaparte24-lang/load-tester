@@ -8,9 +8,10 @@ CLI + (em breve) dashboard em tempo real + relatórios reproduzíveis, com métr
 > `localhost`/`127.0.0.1`/`::1` e nas faixas de `ALLOWED_TARGETS`; qualquer outro host exige
 > `--i-own-this-target` **e** confirmação explícita do hostname.
 
-**Estado:** Fases 0 e 1 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
+**Estado:** Fases 0, 1 e 2 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
 relatório JSON e cenários completos (JSON Schema, templates, CSV, encadeamento, checagens, pesos,
-`lt init`, importação de cURL/OpenAPI). Veja o [roadmap](#roadmap).
+`lt init`, importação de cURL/OpenAPI), motor multi-núcleo com modelos aberto e fechado, perfis,
+tempos por fase, HTTP/2 e detecção de saturação. Veja o [roadmap](#roadmap).
 
 ## Requisitos
 
@@ -65,6 +66,7 @@ Criado a partir de [`.env.example`](.env.example) pelo `setup`. Principais vari�
 | `LT_MAX_RPS`                     | `2000`                 | teto de RPS por execução (`--max-rps` eleva pontualmente)           |
 | `LT_MAX_CONNECTIONS`             | `512`                  | teto de conexões (`--max-connections`)                              |
 | `LT_MAX_DURATION`                | `2h`                   | duração máxima de uma execução                                      |
+| `LT_MAX_VUS`                     | `1000`                 | teto de usuários virtuais no modelo fechado (`--max-vus`)           |
 | `ALLOWED_TARGETS`                | _(vazio)_              | hosts, IPs ou CIDRs extras permitidos: `10.0.0.0/8,*.interna.local` |
 
 Segredos usados nos cenários vêm do ambiente/`.env` via `${env.NOME}` e são **mascarados** (`***`) em
@@ -81,8 +83,9 @@ npx lt validate examples/*.yaml              # valida sem executar (--preview N 
 Durante a execução há uma linha de progresso por segundo; **Ctrl+C** para de agendar e drena as
 requisições em andamento (até 5 s) e salva o relatório parcial; um segundo Ctrl+C força a saída.
 
-Opções de `lt run`: `--out <dir>`, `--quiet`, `--max-rps <n>`, `--max-connections <n>`,
-`--i-own-this-target`, `--confirm-target <host>` (confirmação não interativa para CI).
+Opções de `lt run`: `--out <dir>`, `--quiet`, `--workers <n|auto>`, `--no-system-metrics`,
+`--max-rps <n>`, `--max-connections <n>`, `--max-vus <n>`, `--i-own-this-target`,
+`--confirm-target <host>` (confirmação não interativa para CI).
 
 ### Exit codes
 
@@ -251,65 +254,163 @@ npx lt import openapi openapi.yaml -o cenarios/api.yaml [--base-url URL] [--all-
 `p50`…`p99.9` (qualquer percentil), `min`, `max`, `mean`/`avg`, `errorRate` (`%` ou fração), `rps`;
 operadores `<`, `<=`, `>`, `>=`, `==`; unidades `ms`, `s`, `us`.
 
+## Modelos de carga, perfis e workers
+
+### Modelo aberto × fechado
+
+|                    | `model: open` (padrão)                                  | `model: closed`                                          |
+| ------------------ | ------------------------------------------------------- | -------------------------------------------------------- |
+| O que você define  | taxa de chegada: `rps: 50 -> 300`                       | usuários virtuais: `vus: 10 -> 50` (+ `pacing` opcional) |
+| Alvo lento         | requisições continuam chegando no horário; fila aparece | VUs esperam a resposta e **enviam menos**                |
+| Latência sob carga | correta (mede desde o instante previsto)                | subestimada sem `pacing` (omissão coordenada)            |
+| Bom para           | APIs, SLOs, capacidade, comparações                     | sessões de usuário, limites de concorrência              |
+
+**Use o modelo aberto para endpoints.** No modelo fechado, cada VU repete o fluxo em laço (com `think`).
+Com `pacing: 1s`, cada VU inicia uma iteração a cada 1 s; se o alvo atrasar, a próxima iteração conta a
+latência desde o horário em que **deveria** ter começado. Validado: VUs com `pacing: 50ms` contra
+`/slow?ms=150` têm tempo de serviço ≈ 150 ms, mas latência p99 > 1 s, que é o atraso acumulado que
+um usuário real sentiria. Sem `pacing`, o relatório avisa que a latência pode estar subestimada.
+
+No fechado, o teto `LT_MAX_RPS` é **aplicado ativamente** (limitador GCRA com tolerância de rajada de
+100 ms): VUs rápidos contra um alvo rápido não passam do teto, e o relatório avisa quando isso
+aconteceu. O número máximo de VUs é limitado por `LT_MAX_VUS` (padrão 1000; `--max-vus`).
+
+### Perfis prontos
+
+```bash
+npx lt init cenarios/stress.yaml --profile stress --target http://127.0.0.1:4100 --path /fast
+```
+
+| Perfil   | Forma                                                         | Thresholds sugeridos           |
+| -------- | ------------------------------------------------------------- | ------------------------------ |
+| `smoke`  | 2 rps por 30 s                                                | p95 < 500ms, sem erros         |
+| `load`   | rampa 1 min → platô de 5 min na carga nominal → descida       | p95 < 300ms, p99 < 800ms, < 1% |
+| `stress` | degraus 50 → 200 → 400 → 800 → 1600 rps com `stopWhen`        | p95 < 1s, < 5%                 |
+| `spike`  | base 20 rps → pico de 400 rps em 10 s → recuperação           | p95 < 1s, < 5%                 |
+| `soak`   | 50 rps por 1 h (acompanhe memória/latência ao longo do tempo) | p95 < 300ms, p99 < 1s, < 0,5%  |
+
+Exemplos gerados em [examples/perfis/](examples/perfis/).
+
+### Parar no ponto de ruptura (`stopWhen`)
+
+```yaml
+load:
+  stopWhen: ["errorRate > 5%", "p95 > 2s"]
+```
+
+As condições usam a sintaxe dos thresholds e são avaliadas a cada segundo sobre a janela dos últimos 3 s
+(depois do aquecimento e com pelo menos 10 requisições). Quando uma vale, o teste para de forma graciosa
+e o relatório registra `run.stopReason` e `run.breakingPoint` (segundo, carga pedida e vazão obtida). O
+status continua `completed`: parar na ruptura é o objetivo do teste de stress.
+
+### Workers (vários núcleos)
+
+`load.workers: auto` (padrão) ou `--workers N`. Com mais de um, cada worker é uma `worker_thread` com
+seu próprio pool de conexões e agendador. No aberto, o worker _w_ atende as chegadas _k_ com
+_k_ mod _N_ = _w_; no fechado, divide os VUs. O índice global da iteração é a semente dos dados, então
+**o resultado não depende de quantos workers há**. Um teste automatizado compara 1 e 3 workers e exige
+contagens de falhas idênticas. A coordenação mescla histogramas por segundo; a subida das threads
+(~0,1 s cada, em paralelo) não entra na janela medida.
+
+`auto` usa 1 worker a cada 1.500 rps pedidos (ou 250 VUs), até núcleos − 1. Calibração nesta máquina,
+com alvo e gerador juntos:
+
+| `/fast`  | 1 worker                                                           | 4 workers                       |
+| -------- | ------------------------------------------------------------------ | ------------------------------- |
+| 3000 rps | **inválido** (atraso de agendamento p99 19 ms)                     | válido: p50 0,46 ms, p99 5,6 ms |
+| 5000 rps | limite do **alvo** (demo-target usa um único núcleo, ~4,7 mil rps) | idem                            |
+
+### HTTP/2 e TLS
+
+`target.http2: true` usa HTTP/2 por ALPN em `https://` e h2c (conhecimento prévio) em `http://`. O
+demo-target também escuta h2c em `LT_DEMO_PORT + 1` (4101). Certificados são **sempre** verificados;
+para uma CA própria use `target.tls.ca: ./minha-ca.pem`. O protocolo negociado aparece em
+`summary.connections.byProtocol`.
+
 ## Como as métricas são medidas
 
-**Modelo aberto (padrão).** As chegadas seguem um cronograma determinístico calculado a partir da taxa
-pedida (inclusive em rampas: a k-ésima chegada ocorre quando a integral da taxa atinge k + ½). Novas
-requisições saem no horário **independentemente** de as anteriores terem respondido — como usuários reais
-de uma API. No modelo fechado (N usuários em laço, Fase 2) um servidor lento reduz a própria carga, o que
-esconde problemas.
+**Chegadas no modelo aberto.** As chegadas seguem um cronograma determinístico calculado a partir da taxa
+pedida. Isso vale inclusive em rampas: a k-ésima chegada ocorre quando a integral da taxa atinge k + ½.
+Novas requisições saem no horário, **independentemente** de as anteriores terem respondido.
 
 **Omissão coordenada.** A latência é medida a partir do instante em que a requisição **deveria** ter
-sido enviada, não de quando foi enviada. Se o pool de conexões estiver saturado ou o alvo engasgar, a
-espera entra na latência (como o usuário sentiria). O relatório traz também o **tempo de serviço**
-(envio real → resposta) e o **atraso de agendamento** do gerador, separadamente.
+sido enviada (modelo aberto, ou fechado com `pacing`), não de quando foi enviada. Se o pool de conexões
+estiver saturado ou o alvo engasgar, a espera entra na latência, como o usuário sentiria. O relatório
+traz também, separadamente:
+
+- **tempo de serviço**: envio real → fim da resposta;
+- **TTFB**: envio → headers. Inclui a espera por conexão livre e, quando há, a conexão nova;
+- **download**: headers → fim do corpo;
+- **DNS, TCP e TLS**: medidos **por conexão nova**, com um connector do undici instrumentado. Com
+  keep-alive, poucas requisições abrem conexão, então atribuí-los a cada requisição distorceria as
+  médias.
 
 **Precisão do agendador.** No Windows, `setTimeout` tem granularidade de ~15,6 ms (medido: `setTimeout(1)`
 dispara ~15 ms depois), o que viraria latência fantasma. O agendador dorme até ~17 ms antes do prazo
 (2 ms em Linux/macOS) e faz a aproximação final com `setImmediate`, com precisão de microssegundos. O custo
-é ~1 núcleo de CPU ocupado durante o teste.
+é até ~1 núcleo de CPU por worker durante o teste.
 
-**Histogramas.** Latências vão para HdrHistogram (µs, 3 dígitos significativos → erro ≤ 0,1%); nunca médias
-de médias. O relatório inclui o histograma codificado para comparações futuras.
+**Histogramas.** Latências vão para HdrHistogram (µs, 3 dígitos significativos → erro ≤ 0,1%). Nunca são
+médias de médias: histogramas de workers e segundos são somados. O relatório inclui o histograma
+codificado para comparações.
 
-**Validade.** Se o atraso de agendamento p99 passar de 10 ms, o gerador não sustentou a taxa: o relatório
-é marcado `invalid` e o CLI sai com código 3. Gerador e alvo na mesma máquina disputam CPU — leve isso em
-conta em taxas altas.
+**Saturação do gerador.** O relatório é marcado `invalid` e o CLI sai com código 3 quando:
+
+- o **atraso de agendamento** p99 passa de 10 ms (modelo aberto): as requisições não saíram no horário;
+- o **atraso do event loop** p99 passa de 20 ms (qualquer modelo). Ele é medido com `setImmediate` a cada
+  100 ms em cada worker, o que não depende da granularidade de timers do Windows.
+
+O motor faz espera ativa, então a CPU do próprio processo não indica saturação. Por isso a decisão usa os
+atrasos. A CPU e a memória da **máquina** são coletadas por segundo (`timeline[].cpu`/`memPct`,
+`machine`). Acima de 90% de CPU média, o relatório avisa que gerador e alvo podem estar disputando a
+máquina. `--no-system-metrics` desliga a coleta.
 
 ### Validação da própria ferramenta (Windows 11, Node 26.7, alvo local)
 
-| Experimento                           | Esperado           | Medido                                        |
-| ------------------------------------- | ------------------ | --------------------------------------------- |
-| `/slow?ms=100` a 100 rps, 20 s        | p50 ≈ p99 ≈ 100 ms | p50 100,80 · p99 101,69 · máx 105,43 ms       |
-| taxa a 100 / 200 / 1000 rps           | ±2% da pedida      | 100,00 / 200,00 / 1000,00 (0,00%)             |
-| `/flaky?rate=0.05`, 3 × 16 000 req    | ≈ 5% (σ ≈ 0,17%)   | 4,71% · 4,94% · 4,96%                         |
-| `/flaky?every=20` (determinístico)    | exatamente 5%      | 5% (950 × 200, 50 × 500) — teste automatizado |
-| kill switch (Ctrl+C / `npm run stop`) | poucos segundos    | 0,4 s, parcial salvo, exit 130                |
+| Experimento                           | Esperado           | Medido                                          |
+| ------------------------------------- | ------------------ | ----------------------------------------------- |
+| `/slow?ms=100` a 100 rps, 20 s        | p50 ≈ p99 ≈ 100 ms | p50 100,80 · p99 101,69 · máx 105,43 ms         |
+| taxa a 100 / 200 / 1000 rps           | ±2% da pedida      | 100,00 / 200,00 / 1000,00 (0,00%)               |
+| `/flaky?rate=0.05`, 3 × 16 000 req    | ≈ 5% (σ ≈ 0,17%)   | 4,71% · 4,94% · 4,96%                           |
+| `/flaky?every=20` (determinístico)    | exatamente 5%      | 5% (950 × 200, 50 × 500) — teste automatizado   |
+| kill switch (Ctrl+C / `npm run stop`) | poucos segundos    | 0,4 s, parcial salvo, exit 130                  |
+| `/slow?ms=100` com 4 workers          | igual a 1 worker   | p50 101,18 · p99 102,85 ms, taxa exata          |
+| 1 × 3 workers, mesma semente          | dados idênticos    | mesmas contagens de falhas (teste automatizado) |
+| fechado, 20 VUs, ciclo de 100 ms      | ≈ 200 req/s        | 196–200 req/s no platô; rampa 5→20→1 VUs        |
+| fechado com `--max-rps 300`           | ≤ teto             | 309,5 req/s (rajada inicial tolerada) + aviso   |
 
 ## Relatório JSON (`schemaVersion: 1`)
 
 Gravado em `reports/<AAAAMMDD-HHMMSS>-<cenário>/report.json`. Campos principais:
 
-- `run`: id, status (`completed` | `interrupted` | `failed`), início/fim, seed, `invalid` + motivos, avisos.
-- `config`: alvo (headers mascarados), etapas de carga, aquecimento, conexões, thresholds, `flows`
+- `run`: id, status (`completed` | `interrupted` | `failed`), `model` (`open` | `closed`), início/fim,
+  seed, `invalid` + motivos, avisos e, quando `stopWhen` encerrou o teste, `stopReason` e `breakingPoint`.
+- `config`: alvo (headers mascarados, `http2`), carga (`stages` ou `vuStages`, `pacingMs`, aquecimento,
+  conexões, `workers`, `stopWhen`), thresholds, `flows`
   (nome, peso, etapas), `data` (arquivo, ordem, linhas, colunas) e nomes de `variables`.
 - `summary`: janela medida, requisições ok/falhas, iterações (agendadas/iniciadas/concluídas/descartadas),
-  `errorRate` (0..1), `rps` (pedida/enviada/concluída), `latencyMs` e `serviceTimeMs`
+  `errorRate` (0..1), `rps` (pedida — `null` no fechado —, enviada, concluída), `maxConcurrency`,
+  `latencyMs`, `serviceTimeMs`, `ttfbMs`, `downloadMs`
   (`count, min, mean, stdev, p50, p75, p90, p95, p99, p999, max`), status HTTP, erros por tipo
   (`timeout`, `connection_refused`, `connection_reset`, `dns`, `http_4xx`, `http_5xx`, `check_failed`,
-  `template_error`, …), bytes, `checks` (aprovadas/reprovadas).
+  `template_error`, …), bytes, `checks` (aprovadas/reprovadas) e `connections` (abertas, `byProtocol`,
+  `dnsMs`/`connectMs`/`tlsMs` por conexão nova).
 - `steps[]`: as mesmas métricas por etapa (`flow` + `name`), `checks[]` (nome, aprovadas, reprovadas) e
   `failures[]` (mensagens de falha mais frequentes, até 20 distintas, já mascaradas).
-- `timeline[]`: por segundo — taxa pedida/enviada/concluída, erros, p50/p95/p99/máx.
+- `timeline[]`: por segundo — taxa pedida/enviada/concluída, erros, `concurrency` (iterações
+  simultâneas ou VUs ativos), p50/p95/p99/máx e, com a coleta ativa, `cpu`/`memPct` da máquina.
 - `thresholds[]`: expressão, valor medido, aprovado.
-- `generator`: atraso de agendamento, CPU do processo.
+- `generator`: `workers`, atraso de agendamento, atraso do event loop, CPU dos motores, `throttled`.
+- `machine`: CPU média/máxima e memória da máquina e do processo (`null` com `--no-system-metrics`).
 - `histograms.latencyUs`: HdrHistogram base64 comprimido.
 
 ## Alvo de demonstração
 
 `npm start -- --with-demo` sobe em `http://127.0.0.1:4100`:
 `/fast`, `/slow?ms=100&jitter=10`, `/flaky?rate=0.05&status=500`, `/flaky?every=20`, `/echo`,
-`/status/:code`, `/bytes?n=1024`, `/products?page=1`, `/products/:id`, `/health`.
+`/status/:code`, `/bytes?n=1024`, `/products?page=1`, `/products/:id`, `/health`. As mesmas rotas
+em HTTP/2 sem TLS (h2c) em `http://127.0.0.1:4101` (`LT_DEMO_H2_PORT`; se a porta estiver ocupada,
+só o h2c fica indisponível).
 
 ## Desenvolvimento
 
@@ -329,8 +430,12 @@ Estrutura: `packages/core` (motor, métricas, cenários), `packages/cli` (`lt`),
   O lt nunca encerra processos que não iniciou.
 - **"alvo ... fora da allowlist"** — adicione o host/faixa em `ALLOWED_TARGETS` ou, se o sistema é seu,
   use `--i-own-this-target` (e `--confirm-target <host>` em CI).
-- **"resultado inválido: o gerador não conseguiu sustentar a taxa"** (exit 3) — reduza a taxa, feche
-  programas pesados ou rode o gerador em outra máquina. (Workers multi-núcleo chegam na Fase 2.)
+- **"resultado inválido: o gerador não conseguiu sustentar a taxa"** ou **"o gerador está saturado"**
+  (exit 3): aumente `--workers`, reduza a taxa, feche programas pesados ou rode o gerador em outra
+  máquina. Se `machine.cpuAvg` estiver alto, alvo e gerador estão disputando a CPU.
+- **Descartes (`dropped`) com latência subindo**: geralmente é o **alvo** que não acompanha; veja
+  `timeline[].concurrency` crescendo. Aumente `load.maxInFlight` só se tiver certeza de que o alvo aguenta.
+- **Erro de certificado**: o lt sempre verifica TLS. Para CA própria use `target.tls.ca`.
 - **npm 12 avisa "install scripts blocked" (esbuild)** — inofensivo: o binário do esbuild vem como
   dependência opcional; `tsx` e `vitest` funcionam sem o postinstall.
 - **Serviço não sobe** — o `start` mostra o fim de `logs/<serviço>.log`; veja o arquivo completo.
@@ -340,7 +445,7 @@ Estrutura: `packages/core` (motor, métricas, cenários), `packages/cli` (`lt`),
 - [x] **Fase 0** — scripts, demo-target, `lt run` (modelo aberto), relatório JSON, validação.
 - [x] **Fase 1** — JSON Schema, templates (`randInt`, `uuid`, `pick`), CSV, extração/encadeamento,
       pesos, `lt init`, import cURL/OpenAPI.
-- [ ] **Fase 2** — `worker_threads`, modelo fechado, perfis (smoke/load/stress/spike/soak), tempos de
+- [x] **Fase 2** — `worker_threads`, modelo fechado, perfis (smoke/load/stress/spike/soak), tempos de
       DNS/conexão/TLS/TTFB, HTTP/2, detecção ampliada de saturação, CPU/memória.
 - [ ] **Fase 3** — `lt bench`, A/B, `lt compare` com significância estatística, baseline.
 - [ ] **Fase 4** — relatórios HTML/CSV/Markdown, JUnit, Prometheus, exemplo de GitHub Actions.

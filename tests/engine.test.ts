@@ -115,6 +115,7 @@ flow: [ { request: { path: "/" } } ]
       "timeline",
       "thresholds",
       "generator",
+      "machine",
       "histograms",
     ]);
     expect(r.histograms.latencyUs.length).toBeGreaterThan(10);

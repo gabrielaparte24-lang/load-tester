@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=../../schema/scenario.schema.json
+# Perfil "smoke" — Smoke: poucas requisições para confirmar que tudo responde antes de gerar carga
+# Rode antes de qualquer outro perfil (e em todo PR, no CI).
+name: "smoke"
+description: "Smoke: poucas requisições para confirmar que tudo responde antes de gerar carga"
+target:
+  baseUrl: http://127.0.0.1:4100
+  timeoutMs: 10000
+load:
+  model: open
+  stages:
+    - { duration: 30s, rps: 2 }
+thresholds:
+  - "p95 < 500ms"
+  - "errorRate == 0%"
+flow:
+  - name: requisição principal
+    request: { method: GET, path: /fast }
+    expect: { status: 200 }

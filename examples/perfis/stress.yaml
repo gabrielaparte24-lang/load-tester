@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=../../schema/scenario.schema.json
+# Perfil "stress" — Stress: aumenta a carga em degraus até o sistema quebrar (stopWhen registra onde)
+# O teste para sozinho quando uma condição de stopWhen vale por 3 s seguidos; o relatório
+# traz breakingPoint (carga pedida × vazão obtida no momento da ruptura).
+# Degraus acima de LT_MAX_RPS exigem elevar o teto (.env ou --max-rps).
+name: "stress"
+description: "Stress: aumenta a carga em degraus até o sistema quebrar (stopWhen registra onde)"
+target:
+  baseUrl: http://127.0.0.1:4100
+  timeoutMs: 10000
+load:
+  model: open
+  warmup: 30s
+  stopWhen: ["errorRate > 5%", "p95 > 2s"]
+  stages:
+    - { duration: 30s, rps: 50 } # aquecimento
+    - { duration: 1m, rps: 50 -> 200 }
+    - { duration: 1m, rps: 200 -> 400 }
+    - { duration: 1m, rps: 400 -> 800 }
+    - { duration: 1m, rps: 800 -> 1600 }
+    - { duration: 1m, rps: 1600 }
+thresholds:
+  - "p95 < 1s"
+  - "errorRate < 5%"
+flow:
+  - name: requisição principal
+    request: { method: GET, path: /fast }
+    expect: { status: 200 }

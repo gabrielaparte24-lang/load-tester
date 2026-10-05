@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
+# HTTP/2 contra o demo-target. Em http:// usa h2c (conhecimento prévio; o demo-target escuta em
+# LT_DEMO_PORT + 1). Em https:// o HTTP/2 é negociado por ALPN; para certificados de uma CA própria
+# use target.tls.ca: ./minha-ca.pem (o lt nunca desliga a verificação de certificado).
+name: http2-h2c
+target:
+  baseUrl: http://127.0.0.1:4101
+  http2: true
+load:
+  model: open
+  stages:
+    - { duration: 20s, rps: 200 }
+thresholds:
+  - "p95 < 50ms"
+  - "errorRate < 1%"
+flow:
+  - request: { method: GET, path: /fast }
+    expect: { status: 200 }

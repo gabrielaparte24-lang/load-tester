@@ -16,13 +16,18 @@ export function freePort(): Promise<number> {
 }
 
 /** Sobe o demo-target compilado em processo separado (para não disputar o event loop do gerador). */
-export async function startDemo(): Promise<{ url: string; stop: () => Promise<void> }> {
+export async function startDemo(): Promise<{
+  url: string;
+  h2Url: string;
+  stop: () => Promise<void>;
+}> {
   const port = await freePort();
+  const h2Port = await freePort();
   const child: ChildProcess = spawn(
     process.execPath,
     [path.join(ROOT, "packages/demo-target/dist/main.js")],
     {
-      env: { ...process.env, LT_SERVICE_PORT: String(port) },
+      env: { ...process.env, LT_SERVICE_PORT: String(port), LT_DEMO_H2_PORT: String(h2Port) },
       stdio: "ignore",
     },
   );
@@ -40,6 +45,7 @@ export async function startDemo(): Promise<{ url: string; stop: () => Promise<vo
   }
   return {
     url,
+    h2Url: `http://127.0.0.1:${h2Port}`,
     stop: () =>
       new Promise((resolve) => {
         if (child.exitCode !== null || child.signalCode !== null) return resolve();

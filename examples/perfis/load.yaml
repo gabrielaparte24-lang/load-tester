@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../../schema/scenario.schema.json
+# Perfil "load" — Load: carga nominal esperada em produção, sustentada por alguns minutos
+# Ajuste o platô para o tráfego de pico real (ex.: pico de 1 h de produção × 1,2).
+name: "load"
+description: "Load: carga nominal esperada em produção, sustentada por alguns minutos"
+target:
+  baseUrl: http://127.0.0.1:4100
+  timeoutMs: 10000
+load:
+  model: open
+  warmup: 1m
+  stages:
+    - { duration: 1m, rps: 10 -> 100 } # aquecimento (descartado)
+    - { duration: 5m, rps: 100 } # platô na carga nominal
+    - { duration: 1m, rps: 100 -> 0 } # descida
+thresholds:
+  - "p95 < 300ms"
+  - "p99 < 800ms"
+  - "errorRate < 1%"
+flow:
+  - name: requisição principal
+    request: { method: GET, path: /fast }
+    expect: { status: 200 }

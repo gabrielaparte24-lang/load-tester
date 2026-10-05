@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../../schema/scenario.schema.json
+# Perfil "spike" — Spike: pico súbito de tráfego e recuperação
+# Compare a latência antes, durante e depois do pico na linha do tempo do relatório.
+name: "spike"
+description: "Spike: pico súbito de tráfego e recuperação"
+target:
+  baseUrl: http://127.0.0.1:4100
+  timeoutMs: 10000
+load:
+  model: open
+  stages:
+    - { duration: 1m, rps: 20 } # linha de base
+    - { duration: 10s, rps: 20 -> 400 } # subida brusca
+    - { duration: 1m, rps: 400 } # pico
+    - { duration: 10s, rps: 400 -> 20 }
+    - { duration: 2m, rps: 20 } # recuperação
+thresholds:
+  - "p95 < 1s"
+  - "errorRate < 5%"
+flow:
+  - name: requisição principal
+    request: { method: GET, path: /fast }
+    expect: { status: 200 }
