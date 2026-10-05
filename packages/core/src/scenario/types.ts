@@ -76,10 +76,21 @@ export interface Scenario {
     baseUrl: string;
     headers: [string, Template][];
     timeoutMs: number;
+    http2: boolean;
+    /** CA adicional (PEM) para alvos com certificado próprio. */
+    ca?: string;
   };
   load: {
-    model: "open";
+    model: "open" | "closed";
+    /** Modelo aberto: taxa de chegada por etapa. */
     stages: RateStage[];
+    /** Modelo fechado: usuários virtuais por etapa. */
+    vuStages: VuStage[];
+    /** Modelo fechado: intervalo entre inícios de iteração de cada VU. */
+    pacingMs?: number;
+    workers: number | "auto";
+    /** Condições (sintaxe de threshold) que encerram o teste quando valem por 3 s seguidos. */
+    stopWhen: string[];
     /** Início descartado das estatísticas (aquecimento). */
     warmupMs: number;
     /** Máximo de iterações simultâneas; acima disso a chegada é descartada (dropped). */
@@ -95,4 +106,12 @@ export interface Scenario {
   /** Valores vindos de ${env.X}: tratados como segredos e mascarados nas saídas. */
   secrets: string[];
   sourceFile?: string;
+  /** Texto original: workers reconstroem o cenário a partir dele (com a mesma semente). */
+  source: { text: string; file?: string; baseDir: string };
+}
+
+export interface VuStage {
+  durationMs: number;
+  vusFrom: number;
+  vusTo: number;
 }

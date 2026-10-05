@@ -78,12 +78,17 @@ export interface Limits {
   maxRps: number;
   maxConnections: number;
   maxDurationMs: number;
+  maxVus: number;
 }
 
 export interface LoadSummary {
+  model: "open" | "closed";
+  /** Pico de taxa pedida (aberto); no fechado, o teto aplicado durante a execução. */
   peakRps: number;
+  peakVus: number;
   durationMs: number;
-  expectedRequests: number;
+  /** Estimativa (aberto); null no fechado, onde depende da velocidade do alvo. */
+  expectedRequests: number | null;
   connections: number;
 }
 
@@ -91,14 +96,21 @@ export interface LoadSummary {
 export function enforceLimits(scenario: Scenario, limits: Limits): LoadSummary {
   const schedule = new ArrivalSchedule(scenario.load.stages);
   const connections = scenario.load.connections ?? limits.maxConnections;
+  const open = scenario.load.model === "open";
+  const peakVus = Math.max(0, ...scenario.load.vuStages.map((s) => Math.max(s.vusFrom, s.vusTo)));
   const summary: LoadSummary = {
-    peakRps: schedule.peakRps,
+    model: scenario.load.model,
+    peakRps: open ? schedule.peakRps : limits.maxRps,
+    peakVus,
     durationMs: schedule.totalMs,
-    expectedRequests: Math.round(schedule.expectedCount * avgSteps(scenario)),
+    expectedRequests: open ? Math.round(schedule.expectedCount * avgSteps(scenario)) : null,
     connections,
   };
   const problems: string[] = [];
-  if (summary.peakRps > limits.maxRps) {
+  if (!open && peakVus > limits.maxVus) {
+    problems.push(`${peakVus} VUs excedem o teto de ${limits.maxVus} (LT_MAX_VUS ou --max-vus)`);
+  }
+  if (open && summary.peakRps > limits.maxRps) {
     problems.push(
       `pico de ${summary.peakRps} rps excede o teto de ${limits.maxRps} rps (LT_MAX_RPS ou --max-rps)`,
     );

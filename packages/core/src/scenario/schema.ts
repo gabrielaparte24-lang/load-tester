@@ -173,6 +173,20 @@ export const scenarioSchema = {
         headers: templMap,
         timeoutMs: { type: "integer", minimum: 1 },
         timeout: duration,
+        http2: {
+          type: "boolean",
+          description: "HTTP/2: via ALPN em https:// ou h2c (conhecimento prévio) em http://",
+        },
+        tls: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            ca: {
+              type: "string",
+              description: "PEM de uma CA adicional a confiar (relativo ao cenário)",
+            },
+          },
+        },
       },
     },
     load: {
@@ -180,8 +194,30 @@ export const scenarioSchema = {
       additionalProperties: false,
       required: ["stages"],
       properties: {
-        model: { type: "string", enum: ["open", "closed"] },
+        model: {
+          type: "string",
+          enum: ["open", "closed"],
+          description:
+            "open = taxa de chegada fixa (rps); closed = N usuários virtuais em laço (vus)",
+        },
         warmup: duration,
+        pacing: {
+          ...duration,
+          description:
+            "modelo fechado: intervalo entre inícios de iteração de cada VU (corrige omissão coordenada)",
+        },
+        workers: {
+          type: ["integer", "string"],
+          minimum: 1,
+          pattern: "^auto$",
+          "x-erro": 'use um inteiro ≥ 1 ou "auto"',
+        },
+        stopWhen: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            'para o teste quando a condição vale por 3 s seguidos, ex.: "errorRate > 5%", "p95 > 2s"',
+        },
         maxInFlight: { type: "integer", minimum: 1 },
         connections: { type: "integer", minimum: 1 },
         stages: {
@@ -190,7 +226,7 @@ export const scenarioSchema = {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["duration", "rps"],
+            required: ["duration"],
             properties: {
               duration,
               rps: {
@@ -198,6 +234,12 @@ export const scenarioSchema = {
                 minimum: 0,
                 pattern: "^\\s*\\d+(\\.\\d+)?\\s*((->|→)\\s*\\d+(\\.\\d+)?\\s*)?$",
                 "x-erro": 'deve ser um número ≥ 0 ou uma rampa "50 -> 300"',
+              },
+              vus: {
+                type: ["integer", "string"],
+                minimum: 0,
+                pattern: "^\\s*\\d+\\s*((->|→)\\s*\\d+\\s*)?$",
+                "x-erro": 'deve ser um inteiro ≥ 0 ou uma rampa "10 -> 50"',
               },
             },
           },

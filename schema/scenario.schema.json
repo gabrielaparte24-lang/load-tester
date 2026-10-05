@@ -45,6 +45,20 @@
           "type": "string",
           "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
           "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+        },
+        "http2": {
+          "type": "boolean",
+          "description": "HTTP/2: via ALPN em https:// ou h2c (conhecimento prévio) em http://"
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ca": {
+              "type": "string",
+              "description": "PEM de uma CA adicional a confiar (relativo ao cenário)"
+            }
+          }
         }
       }
     },
@@ -55,12 +69,32 @@
       "properties": {
         "model": {
           "type": "string",
-          "enum": ["open", "closed"]
+          "enum": ["open", "closed"],
+          "description": "open = taxa de chegada fixa (rps); closed = N usuários virtuais em laço (vus)"
         },
         "warmup": {
           "type": "string",
           "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
           "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+        },
+        "pacing": {
+          "type": "string",
+          "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+          "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")",
+          "description": "modelo fechado: intervalo entre inícios de iteração de cada VU (corrige omissão coordenada)"
+        },
+        "workers": {
+          "type": ["integer", "string"],
+          "minimum": 1,
+          "pattern": "^auto$",
+          "x-erro": "use um inteiro ≥ 1 ou \"auto\""
+        },
+        "stopWhen": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "para o teste quando a condição vale por 3 s seguidos, ex.: \"errorRate > 5%\", \"p95 > 2s\""
         },
         "maxInFlight": {
           "type": "integer",
@@ -76,7 +110,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["duration", "rps"],
+            "required": ["duration"],
             "properties": {
               "duration": {
                 "type": "string",
@@ -88,6 +122,12 @@
                 "minimum": 0,
                 "pattern": "^\\s*\\d+(\\.\\d+)?\\s*((->|→)\\s*\\d+(\\.\\d+)?\\s*)?$",
                 "x-erro": "deve ser um número ≥ 0 ou uma rampa \"50 -> 300\""
+              },
+              "vus": {
+                "type": ["integer", "string"],
+                "minimum": 0,
+                "pattern": "^\\s*\\d+\\s*((->|→)\\s*\\d+\\s*)?$",
+                "x-erro": "deve ser um inteiro ≥ 0 ou uma rampa \"10 -> 50\""
               }
             }
           }

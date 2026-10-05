@@ -29,6 +29,7 @@ import type {
   RequestSpec,
   Scenario,
   Step,
+  VuStage,
 } from "./types.js";
 
 export interface ScenarioIssue {
@@ -203,6 +204,8 @@ const guessType = (file: string) =>
 export interface ParseOptions {
   /** Base para arquivos relativos (CSV, corpos). Padrão: pasta do arquivo do cenário ou cwd. */
   baseDir?: string;
+  /** Força a semente (workers recebem a do coordenador para gerar os mesmos dados). */
+  seed?: number;
 }
 
 /** Interpreta e valida um cenário YAML/JSON. Lança ScenarioError com linha/coluna de cada problema. */
@@ -337,7 +340,16 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     timeoutMs:
       (t.timeoutMs as number | undefined) ??
       (t.timeout !== undefined ? parseDuration(t.timeout as string) : 10_000),
+    http2: (t.http2 as boolean | undefined) ?? false,
+    ca: undefined as string | undefined,
   };
+  const tlsOpts = t.tls as Obj | undefined;
+  if (tlsOpts?.ca !== undefined) {
+    target.ca = readFile(tlsOpts.ca as string, ["target", "tls", "ca"])?.toString("utf8");
+    if (!target.baseUrl.startsWith("https:")) {
+      loc.fail(["target", "tls"], "tls só se aplica a alvos https://");
+    }
+  }
   try {
     new URL(target.baseUrl);
   } catch {
@@ -346,17 +358,61 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
 
   // carga
   const l = r.load as Obj;
-  if (l.model === "closed") {
-    loc.fail(["load", "model"], 'modelo "closed" chega na Fase 2; use "open" por enquanto');
-  }
-  const stages: RateStage[] = (l.stages as Obj[]).map((s) => {
-    const [from, to] =
-      typeof s.rps === "number"
-        ? [s.rps, s.rps]
-        : (s.rps as string).split(/->|→/).map((x) => Number(x.trim()));
-    return { durationMs: parseDuration(s.duration as string), rpsFrom: from!, rpsTo: to ?? from! };
+  const model = (l.model as "open" | "closed" | undefined) ?? "open";
+  const range = (v: unknown): [number, number] => {
+    if (typeof v === "number") return [v, v];
+    const [a, b] = String(v)
+      .split(/->|→/)
+      .map((x) => Number(x.trim()));
+    return [a!, b ?? a!];
+  };
+  const stages: RateStage[] = [];
+  const vuStages: VuStage[] = [];
+  (l.stages as Obj[]).forEach((st, i) => {
+    const p: Path = ["load", "stages", i];
+    const durationMs = parseDuration(st.duration as string);
+    const unit = model === "open" ? "rps" : "vus";
+    const other = model === "open" ? "vus" : "rps";
+    if (st[other] !== undefined) {
+      loc.fail(
+        [...p, other],
+        `modelo ${model} usa "${unit}" (${other} é do modelo ${model === "open" ? "closed" : "open"})`,
+      );
+    }
+    if (st[unit] === undefined) {
+      loc.fail(p, `informe "${unit}" (modelo ${model})`);
+      return;
+    }
+    const [from, to] = range(st[unit]);
+    if (model === "open") stages.push({ durationMs, rpsFrom: from, rpsTo: to });
+    else {
+      vuStages.push({ durationMs, vusFrom: from, vusTo: to });
+      // o cronograma de chegadas não se aplica; mantém só a duração para relatórios
+      stages.push({ durationMs, rpsFrom: 0, rpsTo: 0 });
+    }
   });
   const totalMs = stages.reduce((s, st) => s + st.durationMs, 0);
+  if (model === "open" && l.pacing !== undefined) {
+    loc.fail(
+      ["load", "pacing"],
+      "pacing só se aplica ao modelo closed (no open, a taxa já define o ritmo)",
+    );
+  }
+  if (model === "closed" && l.maxInFlight !== undefined) {
+    loc.fail(
+      ["load", "maxInFlight"],
+      "maxInFlight só se aplica ao modelo open (no closed, use vus)",
+    );
+  }
+  const stopWhen: string[] = [];
+  ((l.stopWhen as string[] | undefined) ?? []).forEach((c, i) => {
+    try {
+      parseThreshold(c);
+      stopWhen.push(c);
+    } catch (e) {
+      loc.fail(["load", "stopWhen", i], (e as Error).message.replace("threshold", "condição"));
+    }
+  });
   const warmupMs = l.warmup !== undefined ? parseDuration(l.warmup as string) : 0;
   if (warmupMs && warmupMs >= totalMs) {
     loc.fail(["load", "warmup"], "o aquecimento deve ser menor que a duração total");
@@ -572,8 +628,12 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     description: r.description as string | undefined,
     target,
     load: {
-      model: "open",
+      model,
       stages,
+      vuStages,
+      pacingMs: l.pacing !== undefined ? parseDuration(l.pacing as string) : undefined,
+      workers: (l.workers as number | "auto" | undefined) ?? "auto",
+      stopWhen,
       warmupMs,
       maxInFlight: l.maxInFlight as number | undefined,
       connections: l.connections as number | undefined,
@@ -582,9 +642,10 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     variables,
     data: datasets,
     flows,
-    seed: (r.seed as number | undefined) ?? randomInt(1, 2 ** 31 - 1),
+    seed: opts.seed ?? (r.seed as number | undefined) ?? randomInt(1, 2 ** 31 - 1),
     secrets: [...secrets],
     sourceFile: file,
+    source: { text, file, baseDir },
   };
 }
 

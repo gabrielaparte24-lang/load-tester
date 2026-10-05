@@ -17,6 +17,7 @@ export interface LtConfig {
   maxRps: number;
   maxConnections: number;
   maxDurationMs: number;
+  maxVus: number;
   allowedTargets: string[];
   logLevel: string;
 }
@@ -95,6 +96,7 @@ export function getConfig(opts: { reload?: boolean } = {}): LtConfig {
     maxRps: intEnv("LT_MAX_RPS", 2000),
     maxConnections: intEnv("LT_MAX_CONNECTIONS", 512),
     maxDurationMs: parseDuration(env.LT_MAX_DURATION || "2h", "LT_MAX_DURATION"),
+    maxVus: intEnv("LT_MAX_VUS", 1000),
     allowedTargets: (env.ALLOWED_TARGETS || "")
       .split(",")
       .map((s) => s.trim())

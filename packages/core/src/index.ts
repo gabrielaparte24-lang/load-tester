@@ -9,6 +9,10 @@ export * from "./secrets.js";
 export * from "./safety.js";
 export * from "./report.js";
 export * from "./runner.js";
+export * from "./engine/engine.js";
+export * from "./engine/protocol.js";
+export * from "./engine/system.js";
+export * from "./engine/connector.js";
 export * from "./scenario/types.js";
 export * from "./scenario/load.js";
 export * from "./scenario/schema.js";
@@ -20,6 +24,7 @@ export * from "./scenario/random.js";
 export * from "./scenario/execute.js";
 export * from "./scenario/preview.js";
 export * from "./scenario/init.js";
+export * from "./scenario/profiles.js";
 export * from "./importers/curl.js";
 export * from "./importers/openapi.js";
 

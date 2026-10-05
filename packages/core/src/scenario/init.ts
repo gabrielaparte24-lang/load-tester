@@ -7,7 +7,7 @@ export function initScenarioYaml(opts: {
   return `# yaml-language-server: $schema=${opts.schemaPath}
 # Cenário gerado por \`lt init\`. Valide com: npx lt validate <arquivo> --preview 3
 # Execute com:  npx lt run <arquivo>   (demo: npm start -- --with-demo)
-name: ${opts.name}
+name: ${JSON.stringify(opts.name)}
 description: Exemplo com variáveis, encadeamento, checagens e pesos entre fluxos
 
 target:
