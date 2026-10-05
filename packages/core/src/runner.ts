@@ -20,7 +20,19 @@ import {
   type TimelinePoint,
 } from "./report.js";
 import { ArrivalSchedule } from "./schedule.js";
-import type { Scenario, Step } from "./scenario/types.js";
+import {
+  MAX_BODY_BYTES,
+  buildRequest,
+  createIteration,
+  evaluateResponse,
+  templateErrorMessage,
+  thinkTimeMs,
+  type BuiltRequest,
+  type Evaluation,
+  type Iteration,
+  type ResponseData,
+} from "./scenario/execute.js";
+import type { Scenario } from "./scenario/types.js";
 import { maskDeep, maskHeaders } from "./secrets.js";
 import { evaluateThresholds, parseThreshold } from "./thresholds.js";
 
@@ -54,11 +66,11 @@ export interface RunOptions {
 /** Atraso de agendamento p99 acima disso invalida a execução. */
 export const MAX_SCHEDULE_LAG_P99_MS = 10;
 
-interface RequestOutcome {
-  status: number;
+interface SendOutcome {
+  res?: ResponseData;
   error?: ErrorType;
+  message?: string;
   bytesIn: number;
-  bytesOut: number;
 }
 
 export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunReport> {
@@ -76,13 +88,26 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
   });
 
   const hardAbort = new AbortController();
-  const steps = sc.flow.map((s) => new StepMetrics(s.name, s.request.method, s.request.path));
+  const multiFlow = sc.flows.length > 1;
+  const flowMetrics = sc.flows.map((f) =>
+    f.steps.map(
+      (s) =>
+        new StepMetrics(
+          s.name,
+          s.request.method,
+          s.label.slice(s.request.method.length + 1),
+          multiFlow ? f.name : "",
+        ),
+    ),
+  );
+  const steps = flowMetrics.flat();
   const total = new StepMetrics("total", "*", "*");
   const serviceTime = newHistogram();
   const scheduleLag = newHistogram();
   const timeline: TimelineBucket[] = [];
   const warmupMs = sc.load.warmupMs;
 
+  let iterationSeq = 0;
   let scheduledMain = 0;
   let started = 0;
   let completed = 0;
@@ -120,20 +145,7 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
     if ((schedulingDone || stopping) && inFlight === 0) resolveIdle();
   };
 
-  const executeRequest = async (step: Step): Promise<RequestOutcome> => {
-    const req = step.request;
-    const qs = Object.keys(req.query).length
-      ? (req.path.includes("?") ? "&" : "?") + new URLSearchParams(req.query).toString()
-      : "";
-    const fullPath = basePath + req.path + qs;
-    const headers: Record<string, string> = { ...sc.target.headers, ...req.headers };
-    if (req.contentType && !Object.keys(headers).some((h) => h.toLowerCase() === "content-type")) {
-      headers["content-type"] = req.contentType;
-    }
-    let bytesOut = `${req.method} ${fullPath} HTTP/1.1\r\nhost: ${base.host}\r\n`.length + 2;
-    for (const [k, v] of Object.entries(headers)) bytesOut += k.length + v.length + 4;
-    if (req.body) bytesOut += Buffer.byteLength(req.body);
-
+  const send = async (req: BuiltRequest, needsBody: boolean): Promise<SendOutcome> => {
     const ac = new AbortController();
     const onHard = () => ac.abort(new DOMException("execução interrompida", "AbortError"));
     hardAbort.signal.addEventListener("abort", onHard, { once: true });
@@ -143,69 +155,121 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
     );
     try {
       const res = await pool.request({
-        method: req.method,
-        path: fullPath,
-        headers,
+        method: req.method as "GET",
+        path: req.path,
+        headers: req.headers,
         body: req.body,
         signal: ac.signal,
         headersTimeout: sc.target.timeoutMs,
         bodyTimeout: sc.target.timeoutMs,
       });
       let bytesIn = 0;
-      for await (const chunk of res.body) bytesIn += (chunk as Buffer).length;
+      let kept = 0;
+      let truncated = false;
+      const chunks: Buffer[] = [];
+      for await (const chunk of res.body) {
+        const c = chunk as Buffer;
+        bytesIn += c.length;
+        if (!needsBody) continue;
+        if (kept + c.length <= MAX_BODY_BYTES) {
+          chunks.push(c);
+          kept += c.length;
+        } else truncated = true;
+      }
       for (const [k, v] of Object.entries(res.headers)) {
         bytesIn += k.length + (Array.isArray(v) ? v.join(", ").length : String(v ?? "").length) + 4;
       }
-      const status = res.statusCode;
-      let error: ErrorType | undefined;
-      const accepted = step.expect.status;
-      if (accepted ? !accepted.includes(status) : status >= 400) {
-        error = status >= 500 ? "http_5xx" : status >= 400 ? "http_4xx" : "check_failed";
-      }
-      return { status, error, bytesIn, bytesOut };
+      return {
+        res: {
+          status: res.statusCode,
+          headers: res.headers,
+          body: needsBody ? Buffer.concat(chunks) : undefined,
+          truncated,
+        },
+        bytesIn,
+      };
     } catch (err) {
-      const reason = ac.signal.aborted ? (ac.signal.reason as Error) : err;
-      return { status: 0, error: classifyError(reason), bytesIn: 0, bytesOut };
+      const reason = ac.signal.aborted ? (ac.signal.reason as Error) : (err as Error);
+      return {
+        error: classifyError(reason),
+        message: reason?.message ?? String(reason),
+        bytesIn: 0,
+      };
     } finally {
       clearTimeout(to);
       hardAbort.signal.removeEventListener("abort", onHard);
     }
   };
 
-  const runIteration = async (intendedAbs: number, warmup: boolean): Promise<void> => {
+  /** Falha antes de enviar (ex.: template inválido em tempo de execução): conta como requisição com erro. */
+  const recordUnsent = (m: StepMetrics, warmup: boolean, message: string) => {
+    const b = bucket(performance.now() - startPerf);
+    b.requests++;
+    b.errors++;
+    if (warmup) return;
+    for (const x of [m, total]) {
+      x.requests++;
+      x.addError("template_error", message);
+    }
+  };
+
+  const runIteration = async (
+    intendedAbs: number,
+    warmup: boolean,
+    index: number,
+  ): Promise<void> => {
+    let it: Iteration;
+    try {
+      it = createIteration(sc, index);
+    } catch (e) {
+      recordUnsent(flowMetrics[0]![0]!, warmup, `variables: ${templateErrorMessage(e)}`);
+      return;
+    }
+    const metrics = flowMetrics[it.flowIndex]!;
     let intended = intendedAbs;
-    for (let i = 0; i < sc.flow.length; i++) {
+    for (let i = 0; i < it.flow.steps.length; i++) {
       if (i > 0 && (stopping || hardAbort.signal.aborted)) return;
-      const step = sc.flow[i]!;
+      const step = it.flow.steps[i]!;
+      let req: BuiltRequest;
+      try {
+        req = buildRequest(sc, step, it.ctx, basePath, base.host);
+      } catch (e) {
+        recordUnsent(metrics[i]!, warmup, templateErrorMessage(e));
+        return;
+      }
       const sentAt = performance.now();
-      const out = await executeRequest(step);
+      const out = await send(req, step.needsBody);
       const end = performance.now();
       const latency = end - intended;
-      if (!out.error && step.expect.maxDurationMs && latency > step.expect.maxDurationMs)
-        out.error = "check_failed";
       if (out.error === "aborted") {
         aborted++;
         return;
       }
+      const ev: Evaluation = out.res
+        ? evaluateResponse(step, out.res, latency, it.ctx)
+        : { checks: [], error: out.error, message: out.message };
 
       const b = bucket(end - startPerf);
       b.requests++;
-      if (out.error) b.errors++;
+      if (ev.error) b.errors++;
       recordMs(b.latency, latency);
 
       if (!warmup) {
-        for (const m of [steps[i]!, total]) {
+        const status = out.res?.status;
+        for (const m of [metrics[i]!, total]) {
           m.requests++;
           m.bytesIn += out.bytesIn;
-          m.bytesOut += out.bytesOut;
+          m.bytesOut += req.bytesOut;
           recordMs(m.latency, latency);
-          if (out.status) m.statusCodes[out.status] = (m.statusCodes[out.status] ?? 0) + 1;
-          if (out.error) m.addError(out.error);
+          if (status) m.statusCodes[status] = (m.statusCodes[status] ?? 0) + 1;
+          if (ev.error) m.addError(ev.error, ev.message);
         }
+        for (const c of ev.checks) metrics[i]!.addCheck(c.label, c.ok);
         recordMs(serviceTime, end - sentAt);
       }
-      if (out.error) return; // etapas seguintes dependem desta
-      if (step.thinkMs) await timer.sleep(step.thinkMs);
+      if (ev.error) return; // etapas seguintes dependem desta
+      const think = thinkTimeMs(step, it.ctx);
+      if (think > 0) await timer.sleep(think);
       intended = performance.now();
     }
     if (!warmup) completed++;
@@ -213,6 +277,8 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
 
   const onArrival = (tRel: number) => {
     if (stopping) return;
+    // índice atribuído na chegada: dados/semente da iteração não dependem da ordem das respostas
+    const iteration = iterationSeq++;
     const lag = performance.now() - (startPerf + tRel);
     const warmup = tRel < warmupMs;
     const b = bucket(tRel);
@@ -227,7 +293,7 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
       inFlight++;
       b.sent++;
       if (!warmup) started++;
-      runIteration(startPerf + tRel, warmup).finally(() => {
+      runIteration(startPerf + tRel, warmup, iteration).finally(() => {
         inFlight--;
         checkIdle();
       });
@@ -386,11 +452,27 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
     config: {
       target: {
         baseUrl: sc.target.baseUrl,
-        headers: maskHeaders(sc.target.headers, sc.secrets),
+        headers: maskHeaders(
+          Object.fromEntries(sc.target.headers.map(([k, t]) => [k, t.source])),
+          sc.secrets,
+        ),
         timeoutMs: sc.target.timeoutMs,
       },
       load: { model: "open", stages: sc.load.stages, warmupMs, connections, maxInFlight },
       thresholds: sc.thresholds,
+      flows: sc.flows.map((f) => ({
+        name: f.name,
+        weight: f.weight,
+        steps: f.steps.map((x) => x.label),
+      })),
+      data: sc.data.map((d) => ({
+        file: d.file,
+        name: d.name,
+        order: d.order,
+        rows: d.rows.length,
+        columns: d.columns,
+      })),
+      variables: sc.variables.map(([k]) => k),
     },
     summary: {
       windowMs: round(windowMs, 1),
@@ -403,8 +485,19 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
       statusCodes: total.statusCodes,
       errorsByType: total.errorsByType,
       bytes: { received: total.bytesIn, sent: total.bytesOut },
+      checks: steps.reduce(
+        (acc, m) => {
+          for (const c of m.checks.values()) {
+            acc.passed += c.passed;
+            acc.failed += c.failed;
+          }
+          return acc;
+        },
+        { passed: 0, failed: 0 },
+      ),
     },
     steps: steps.map((m) => ({
+      flow: m.flow,
       name: m.name,
       method: m.method,
       path: m.path,
@@ -415,6 +508,10 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
       statusCodes: m.statusCodes,
       errorsByType: m.errorsByType,
       bytes: { received: m.bytesIn, sent: m.bytesOut },
+      checks: [...m.checks].map(([name, c]) => ({ name, ...c })),
+      failures: [...m.failures]
+        .sort((a, b) => b[1] - a[1])
+        .map(([message, count]) => ({ message, count })),
     })),
     timeline: timelinePoints,
     thresholds,

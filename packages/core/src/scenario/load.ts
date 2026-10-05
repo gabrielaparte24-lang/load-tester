@@ -1,11 +1,35 @@
 import fs from "node:fs";
+import path from "node:path";
 import { randomInt } from "node:crypto";
+import { Ajv, type ErrorObject } from "ajv";
 import { LineCounter, isNode, parseDocument, type Document } from "yaml";
 import { parseDuration } from "../duration.js";
 import { ConfigError } from "../errors.js";
 import type { RateStage } from "../schedule.js";
 import { parseThreshold } from "../thresholds.js";
-import { HTTP_METHODS, type HttpMethod, type Scenario, type Step } from "./types.js";
+import { csvToTable } from "./csv.js";
+import { parseJsonPath } from "./jsonpath.js";
+import { parseMatcher } from "./matchers.js";
+import { scenarioSchema } from "./schema.js";
+import {
+  BUILTIN_VARS,
+  compileJson,
+  compileTemplate,
+  referencedVars,
+  type CompileOptions,
+  type Template,
+} from "./template.js";
+import type {
+  BodySpec,
+  Dataset,
+  ExpectSpec,
+  Extractor,
+  Flow,
+  HttpMethod,
+  RequestSpec,
+  Scenario,
+  Step,
+} from "./types.js";
 
 export interface ScenarioIssue {
   path: string;
@@ -35,318 +59,531 @@ export class ScenarioError extends ConfigError {
 type Path = (string | number)[];
 type Obj = Record<string, unknown>;
 
-const ENV_RE = /\$\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}/g;
-const ANY_EXPR_RE = /\$\{[^}]*\}/;
+const ajv = new Ajv({ allErrors: true, strict: false, verbose: true });
+const validateStructure = ajv.compile(scenarioSchema);
 
-class Validator {
+const TYPE_PT: Record<string, string> = {
+  string: "texto",
+  number: "número",
+  integer: "inteiro",
+  boolean: "booleano (true/false)",
+  object: "objeto (chave: valor)",
+  array: "lista",
+  null: "null",
+};
+
+export function fmtPath(path: Path): string {
+  return path.map((p, i) => (typeof p === "number" ? `[${p}]` : i ? `.${p}` : p)).join("");
+}
+
+class Locator {
   readonly issues: ScenarioIssue[] = [];
-  readonly secrets = new Set<string>();
-
   constructor(
     private readonly doc: Document,
     private readonly lc: LineCounter,
   ) {}
 
   fail(path: Path, message: string): void {
-    const pos = this.locate(path);
-    this.issues.push({ path: fmt(path), message, ...pos });
+    if (this.issues.some((i) => i.path === fmtPath(path) && i.message === message)) return;
+    this.issues.push({ path: fmtPath(path), message, ...this.locate(path) });
   }
 
   private locate(path: Path): { line?: number; col?: number } {
-    for (let p = path; p.length >= 0; p = p.slice(0, -1)) {
+    for (let p = path; ; p = p.slice(0, -1)) {
       const node = p.length ? this.doc.getIn(p, true) : this.doc.contents;
       if (isNode(node) && node.range) {
         const { line, col } = this.lc.linePos(node.range[0]);
         return { line, col };
       }
-      if (!p.length) break;
-    }
-    return {};
-  }
-
-  obj(v: unknown, path: Path, allowed: string[], required = true): Obj | undefined {
-    if (v === undefined || v === null) {
-      if (required) this.fail(path, "campo obrigatório");
-      return undefined;
-    }
-    if (typeof v !== "object" || Array.isArray(v)) {
-      this.fail(path, "deve ser um objeto");
-      return undefined;
-    }
-    for (const k of Object.keys(v)) {
-      if (!allowed.includes(k)) {
-        this.fail([...path, k], `campo desconhecido "${k}" (permitidos: ${allowed.join(", ")})`);
-      }
-    }
-    return v as Obj;
-  }
-
-  str(v: unknown, path: Path, required = true): string | undefined {
-    if (v === undefined || v === null) {
-      if (required) this.fail(path, "campo obrigatório");
-      return undefined;
-    }
-    if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
-      this.fail(path, "deve ser texto");
-      return undefined;
-    }
-    return this.interpolate(String(v), path);
-  }
-
-  posInt(v: unknown, path: Path): number | undefined {
-    if (v === undefined) return undefined;
-    if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
-      this.fail(path, "deve ser um inteiro positivo");
-      return undefined;
-    }
-    return v;
-  }
-
-  duration(v: unknown, path: Path): number | undefined {
-    if (v === undefined) return undefined;
-    try {
-      return parseDuration(v as string, fmt(path));
-    } catch (e) {
-      this.fail(path, (e as Error).message.replace(`${fmt(path)}: `, ""));
-      return undefined;
+      if (!p.length) return {};
     }
   }
+}
 
-  map(v: unknown, path: Path): Record<string, string> {
-    const out: Record<string, string> = {};
-    if (v === undefined || v === null) return out;
-    if (typeof v !== "object" || Array.isArray(v)) {
-      this.fail(path, "deve ser um mapa chave: valor");
-      return out;
-    }
-    for (const [k, val] of Object.entries(v)) {
-      const s = this.str(val, [...path, k]);
-      if (s !== undefined) out[k] = s;
-    }
-    return out;
+/** Converte o instancePath do ajv ("/flow/0/request") em caminho, distinguindo índices de chaves. */
+function toPath(instancePath: string, root: unknown): Path {
+  const out: Path = [];
+  let cur: unknown = root;
+  for (const raw of instancePath.split("/").slice(1)) {
+    const seg = raw.replace(/~1/g, "/").replace(/~0/g, "~");
+    const key = Array.isArray(cur) ? Number(seg) : seg;
+    out.push(key);
+    cur =
+      cur && typeof cur === "object" ? (cur as Record<string | number, unknown>)[key] : undefined;
   }
+  return out;
+}
 
-  /** Substitui ${env.NOME}; demais expressões ${...} chegam na Fase 1 (motor de templates). */
-  interpolate(s: string, path: Path): string {
-    const out = s.replace(ENV_RE, (_m, name: string) => {
-      const val = process.env[name];
-      if (val === undefined) {
-        this.fail(
-          path,
-          `variável de ambiente ${name} não definida (defina no .env ou no ambiente)`,
+function schemaIssues(errors: ErrorObject[], raw: unknown, loc: Locator): void {
+  const typeErrorPaths = new Set(
+    errors.filter((e) => e.keyword === "type").map((e) => e.instancePath),
+  );
+  for (const e of errors) {
+    if (e.keyword === "propertyNames") continue; // o erro do pattern interno já descreve
+    if (e.keyword !== "type" && typeErrorPaths.has(e.instancePath)) continue;
+    const base = toPath(e.instancePath, raw);
+    const params = e.params as Record<string, unknown>;
+    const parent = (e.parentSchema ?? {}) as Record<string, unknown>;
+    switch (e.keyword) {
+      case "required":
+        loc.fail([...base, params.missingProperty as string], "campo obrigatório");
+        break;
+      case "additionalProperties": {
+        const allowed = Object.keys((parent.properties as object) ?? {}).filter(
+          (k) => k !== "$schema",
         );
-        return "";
+        loc.fail(
+          [...base, params.additionalProperty as string],
+          `campo desconhecido "${params.additionalProperty}"` +
+            (allowed.length ? ` (permitidos: ${allowed.join(", ")})` : ""),
+        );
+        break;
       }
-      this.secrets.add(val);
-      return val;
-    });
-    if (ANY_EXPR_RE.test(out)) {
-      this.fail(
-        path,
-        `expressão "${ANY_EXPR_RE.exec(out)![0]}" ainda não suportada (apenas \${env.NOME} nesta versão)`,
-      );
+      case "type": {
+        const types = ([] as string[]).concat(params.type as string | string[]);
+        // campos com formato próprio (ex.: duração) explicam melhor que "deve ser texto"
+        loc.fail(
+          base,
+          (parent["x-erro"] as string) ??
+            `deve ser ${types.map((t) => TYPE_PT[t] ?? t).join(" ou ")}`,
+        );
+        break;
+      }
+      case "enum": {
+        // métodos aceitam maiúsculas e minúsculas; mostra só uma forma
+        const vals = (params.allowedValues as unknown[]).map(String);
+        const shown = vals.filter((x) => x === x.toUpperCase() || !vals.includes(x.toUpperCase()));
+        loc.fail(base, `deve ser um de: ${shown.join(", ")}`);
+        break;
+      }
+      case "pattern":
+        if (params.propertyName !== undefined) {
+          loc.fail(
+            [...base, params.propertyName as string],
+            `"${params.propertyName}": ${(parent["x-erro"] as string) ?? "nome inválido"}`,
+          );
+        } else
+          loc.fail(base, (parent["x-erro"] as string) ?? `formato inválido (${params.pattern})`);
+        break;
+      case "minimum":
+      case "maximum":
+      case "exclusiveMinimum":
+        loc.fail(base, `deve ser ${params.comparison} ${params.limit}`);
+        break;
+      case "minItems":
+        loc.fail(base, `informe ao menos ${params.limit} item(ns)`);
+        break;
+      case "minLength":
+        loc.fail(base, "não pode ser vazio");
+        break;
+      case "maxLength":
+        loc.fail(base, `no máximo ${params.limit} caractere(s)`);
+        break;
+      default:
+        loc.fail(base, e.message ?? "inválido");
     }
-    return out;
   }
 }
 
-function fmt(path: Path): string {
-  return path.map((p, i) => (typeof p === "number" ? `[${p}]` : i ? `.${p}` : p)).join("");
+const CONTENT_TYPES: Record<string, string> = {
+  ".json": "application/json",
+  ".xml": "application/xml",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+  ".html": "text/html",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".pdf": "application/pdf",
+};
+const guessType = (file: string) =>
+  CONTENT_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
+
+export interface ParseOptions {
+  /** Base para arquivos relativos (CSV, corpos). Padrão: pasta do arquivo do cenário ou cwd. */
+  baseDir?: string;
 }
 
-function parseRps(v: unknown, path: Path, val: Validator): [number, number] | undefined {
-  if (typeof v === "number" && v >= 0) return [v, v];
-  if (typeof v === "string") {
-    const m = /^\s*(\d+(?:\.\d+)?)\s*(?:->|→)\s*(\d+(?:\.\d+)?)\s*$/.exec(v);
-    if (m) return [Number(m[1]), Number(m[2])];
-    if (/^\s*\d+(?:\.\d+)?\s*$/.test(v)) return [Number(v), Number(v)];
-  }
-  val.fail(path, 'deve ser um número ≥ 0 ou uma rampa "50 -> 300"');
-  return undefined;
-}
-
-export function parseScenario(text: string, file?: string): Scenario {
+/** Interpreta e valida um cenário YAML/JSON. Lança ScenarioError com linha/coluna de cada problema. */
+export function parseScenario(text: string, file?: string, opts: ParseOptions = {}): Scenario {
   const lc = new LineCounter();
-  const doc = parseDocument(text, { lineCounter: lc, prettyErrors: true });
+  const doc = parseDocument(text, { lineCounter: lc, prettyErrors: true, merge: true });
   if (doc.errors.length) {
     throw new ScenarioError(
       doc.errors.map((e) => ({
         path: "",
-        message: `YAML inválido: ${e.message.split("\n")[0]}`,
+        message: `YAML inválido: ${e.message.split("\n")[0]!.replace(/ at line \d+, column \d+:?\s*$/, "")}`,
         line: e.linePos?.[0].line,
         col: e.linePos?.[0].col,
       })),
       file,
     );
   }
-  const v = new Validator(doc, lc);
-  const raw = v.obj(
-    doc.toJS(),
-    [],
-    ["name", "description", "target", "load", "thresholds", "flow", "seed"],
-  );
-  if (!raw) throw new ScenarioError(v.issues, file);
+  const raw = doc.toJS() as unknown;
+  const loc = new Locator(doc, lc);
 
-  const name = v.str(raw.name, ["name"]) ?? "";
-  const description = v.str(raw.description, ["description"], false);
-
-  // target
-  const t = v.obj(raw.target, ["target"], ["baseUrl", "headers", "timeoutMs", "timeout"]);
-  let baseUrl = "";
-  if (t) {
-    baseUrl = v.str(t.baseUrl, ["target", "baseUrl"]) ?? "";
-    if (baseUrl) {
-      try {
-        const u = new URL(baseUrl);
-        if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error();
-      } catch {
-        v.fail(["target", "baseUrl"], `URL inválida "${baseUrl}" (use http:// ou https://)`);
-      }
-    }
-  }
-  const headers = v.map(t?.headers, ["target", "headers"]);
-  const timeoutMs =
-    v.posInt(t?.timeoutMs, ["target", "timeoutMs"]) ??
-    v.duration(t?.timeout, ["target", "timeout"]) ??
-    10_000;
-
-  // load
-  const l = v.obj(raw.load, ["load"], ["model", "stages", "warmup", "maxInFlight", "connections"]);
-  const stages: RateStage[] = [];
-  const model = l?.model ?? "open";
-  if (model === "closed")
-    v.fail(["load", "model"], 'modelo "closed" chega na Fase 2; use "open" por enquanto');
-  else if (model !== "open") v.fail(["load", "model"], 'deve ser "open" ou "closed"');
-  if (l) {
-    if (!Array.isArray(l.stages) || !l.stages.length) {
-      v.fail(["load", "stages"], "informe ao menos uma etapa: - { duration: 30s, rps: 50 }");
-    } else {
-      l.stages.forEach((s, i) => {
-        const p = ["load", "stages", i];
-        const st = v.obj(s, p, ["duration", "rps"]);
-        if (!st) return;
-        const durationMs = v.duration(st.duration, [...p, "duration"]);
-        if (st.duration === undefined) v.fail([...p, "duration"], "campo obrigatório");
-        const rps =
-          st.rps === undefined
-            ? (v.fail([...p, "rps"], "campo obrigatório"), undefined)
-            : parseRps(st.rps, [...p, "rps"], v);
-        if (durationMs !== undefined && rps)
-          stages.push({ durationMs, rpsFrom: rps[0], rpsTo: rps[1] });
+  // 1) estrutura (JSON Schema)
+  if (!validateStructure(raw)) {
+    schemaIssues(validateStructure.errors ?? [], raw, loc);
+    // checagens independentes da estrutura, para mostrar todos os problemas de uma vez
+    const ths = (raw as Obj | null)?.thresholds;
+    if (Array.isArray(ths)) {
+      ths.forEach((th, i) => {
+        if (typeof th !== "string") return;
+        try {
+          parseThreshold(th);
+        } catch (e) {
+          loc.fail(["thresholds", i], (e as Error).message);
+        }
       });
     }
+    throw new ScenarioError(loc.issues, file);
   }
+  const r = raw as unknown as Obj;
+  const baseDir = opts.baseDir ?? (file ? path.dirname(path.resolve(file)) : process.cwd());
+
+  // 2) semântica
+  const secrets = new Set<string>();
+  const copts: CompileOptions = { env: (n) => process.env[n], onSecret: (s) => secrets.add(s) };
+  const checkRefs = (t: Template, p: Path, scope: Set<string>, later?: Map<string, number>) => {
+    for (const root of referencedVars(t)) {
+      if (scope.has(root) || BUILTIN_VARS.includes(root)) continue;
+      const hint = later?.has(root)
+        ? ` (ela só é extraída na etapa ${later.get(root)! + 1}, depois desta)`
+        : scope.size
+          ? ` (disponíveis: ${[...scope].join(", ")})`
+          : "";
+      loc.fail(p, `variável "${root}" não definida${hint}`);
+    }
+  };
+  const tpl = (
+    value: unknown,
+    p: Path,
+    scope: Set<string>,
+    later?: Map<string, number>,
+  ): Template => {
+    try {
+      const t = compileTemplate(String(value), copts);
+      checkRefs(t, p, scope, later);
+      return t;
+    } catch (e) {
+      loc.fail(p, (e as Error).message);
+      return compileTemplate("");
+    }
+  };
+  const tplEntries = (
+    m: unknown,
+    p: Path,
+    scope: Set<string>,
+    later?: Map<string, number>,
+  ): [string, Template][] =>
+    Object.entries((m as Obj) ?? {}).map(([k, v]) => [k, tpl(v, [...p, k], scope, later)]);
+  const readFile = (f: string, p: Path): Buffer | undefined => {
+    const full = path.resolve(baseDir, f);
+    try {
+      return fs.readFileSync(full);
+    } catch (e) {
+      loc.fail(
+        p,
+        `não foi possível ler "${f}" (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}; procurado em ${full})`,
+      );
+      return undefined;
+    }
+  };
+
+  // dados (CSV)
+  const datasets: Dataset[] = [];
+  const dataScope = new Set<string>();
+  const rawData = (r.data === undefined ? [] : Array.isArray(r.data) ? r.data : [r.data]) as Obj[];
+  rawData.forEach((d, i) => {
+    const p: Path = Array.isArray(r.data) ? ["data", i] : ["data"];
+    const buf = readFile(d.file as string, [...p, "file"]);
+    if (!buf) return;
+    try {
+      const table = csvToTable(buf.toString("utf8"), (d.delimiter as string) ?? ",");
+      const names = d.name ? [d.name as string] : table.columns;
+      for (const n of names) {
+        if (dataScope.has(n))
+          loc.fail(p, `"${n}" já é definido por outro dataset (use name: para separar)`);
+        dataScope.add(n);
+      }
+      datasets.push({
+        file: d.file as string,
+        name: d.name as string | undefined,
+        order: (d.order as Dataset["order"]) ?? "sequential",
+        ...table,
+      });
+    } catch (e) {
+      loc.fail([...p, "file"], `${d.file}: ${(e as Error).message}`);
+    }
+  });
+
+  // variáveis (em ordem; cada uma enxerga dados e as anteriores)
+  const varScope = new Set(dataScope);
+  const variables: [string, Template][] = Object.entries((r.variables as Obj) ?? {}).map(
+    ([k, v]) => {
+      const t = tpl(v, ["variables", k], varScope);
+      varScope.add(k);
+      return [k, t];
+    },
+  );
+
+  // alvo
+  const t = r.target as Obj;
+  const target = {
+    baseUrl: (t.baseUrl as string).replace(/\/+$/, ""),
+    headers: tplEntries(t.headers, ["target", "headers"], varScope),
+    timeoutMs:
+      (t.timeoutMs as number | undefined) ??
+      (t.timeout !== undefined ? parseDuration(t.timeout as string) : 10_000),
+  };
+  try {
+    new URL(target.baseUrl);
+  } catch {
+    loc.fail(["target", "baseUrl"], `URL inválida "${target.baseUrl}"`);
+  }
+
+  // carga
+  const l = r.load as Obj;
+  if (l.model === "closed") {
+    loc.fail(["load", "model"], 'modelo "closed" chega na Fase 2; use "open" por enquanto');
+  }
+  const stages: RateStage[] = (l.stages as Obj[]).map((s) => {
+    const [from, to] =
+      typeof s.rps === "number"
+        ? [s.rps, s.rps]
+        : (s.rps as string).split(/->|→/).map((x) => Number(x.trim()));
+    return { durationMs: parseDuration(s.duration as string), rpsFrom: from!, rpsTo: to ?? from! };
+  });
   const totalMs = stages.reduce((s, st) => s + st.durationMs, 0);
-  const warmupMs = v.duration(l?.warmup, ["load", "warmup"]) ?? 0;
-  if (warmupMs && warmupMs >= totalMs)
-    v.fail(["load", "warmup"], "o aquecimento deve ser menor que a duração total");
+  const warmupMs = l.warmup !== undefined ? parseDuration(l.warmup as string) : 0;
+  if (warmupMs && warmupMs >= totalMs) {
+    loc.fail(["load", "warmup"], "o aquecimento deve ser menor que a duração total");
+  }
 
   // thresholds
   const thresholds: string[] = [];
-  if (raw.thresholds !== undefined) {
-    if (!Array.isArray(raw.thresholds))
-      v.fail(["thresholds"], 'deve ser uma lista, ex.: ["p95 < 300ms"]');
-    else
-      raw.thresholds.forEach((th, i) => {
-        const s = v.str(th, ["thresholds", i]);
-        if (s === undefined) return;
-        try {
-          parseThreshold(s);
-          thresholds.push(s);
-        } catch (e) {
-          v.fail(["thresholds", i], (e as Error).message);
-        }
-      });
-  }
+  ((r.thresholds as string[]) ?? []).forEach((th, i) => {
+    try {
+      parseThreshold(th);
+      thresholds.push(th);
+    } catch (e) {
+      loc.fail(["thresholds", i], (e as Error).message);
+    }
+  });
 
-  // flow
-  const flow: Step[] = [];
-  if (!Array.isArray(raw.flow) || !raw.flow.length) {
-    v.fail(["flow"], "informe ao menos uma etapa com request: { method: GET, path: / }");
-  } else {
-    raw.flow.forEach((s, i) => {
-      const p: Path = ["flow", i];
-      const st = v.obj(s, p, ["name", "request", "expect", "think"]);
-      if (!st) return;
-      const r = v.obj(
-        st.request,
-        [...p, "request"],
-        ["method", "path", "headers", "query", "json", "body", "form"],
+  // fluxos
+  const compileStep = (s: Obj, p: Path, scope: Set<string>, later: Map<string, number>): Step => {
+    const rq = s.request as Obj;
+    const rp: Path = [...p, "request"];
+    const method = String(rq.method ?? "GET").toUpperCase() as HttpMethod;
+    const query: [string, Template][] = [];
+    for (const [k, v] of Object.entries((rq.query as Obj) ?? {})) {
+      for (const [i, item] of (Array.isArray(v) ? v : [v]).entries()) {
+        query.push([
+          k,
+          tpl(item, Array.isArray(v) ? [...rp, "query", k, i] : [...rp, "query", k], scope, later),
+        ]);
+      }
+    }
+
+    const kinds = ["json", "body", "form", "file", "multipart"].filter((k) => rq[k] !== undefined);
+    if (kinds.length > 1) loc.fail(rp, `use apenas um corpo (encontrados: ${kinds.join(", ")})`);
+    let body: BodySpec | undefined;
+    const ctype = rq.contentType as string | undefined;
+    if (rq.json !== undefined) {
+      const value = compileJson(rq.json, copts, (tt, jp) =>
+        checkRefs(tt, [...rp, "json", ...jp], scope, later),
       );
-      if (!r) return;
-      const method = String(r.method ?? "GET").toUpperCase() as HttpMethod;
-      if (!HTTP_METHODS.includes(method))
-        v.fail([...p, "request", "method"], `método inválido (use ${HTTP_METHODS.join(", ")})`);
-      const path = v.str(r.path, [...p, "request", "path"]) ?? "/";
-      if (!path.startsWith("/"))
-        v.fail([...p, "request", "path"], 'deve começar com "/" (relativo a target.baseUrl)');
-
-      let body: string | undefined;
-      let contentType: string | undefined;
-      const bodyKinds = ["json", "body", "form"].filter((k) => r[k] !== undefined);
-      if (bodyKinds.length > 1) v.fail([...p, "request"], "use apenas um entre json, body e form");
-      if (r.json !== undefined) {
-        body = v.interpolate(JSON.stringify(r.json), [...p, "request", "json"]);
-        contentType = "application/json";
-      } else if (r.body !== undefined) {
-        body = v.str(r.body, [...p, "request", "body"]);
-      } else if (r.form !== undefined) {
-        body = new URLSearchParams(v.map(r.form, [...p, "request", "form"])).toString();
-        contentType = "application/x-www-form-urlencoded";
+      body = { kind: "json", value, contentType: ctype ?? "application/json" };
+    } else if (rq.body !== undefined) {
+      body = {
+        kind: "text",
+        template: tpl(rq.body, [...rp, "body"], scope, later),
+        contentType: ctype,
+      };
+    } else if (rq.form !== undefined) {
+      body = {
+        kind: "form",
+        fields: tplEntries(rq.form, [...rp, "form"], scope, later),
+        contentType: ctype ?? "application/x-www-form-urlencoded",
+      };
+    } else if (rq.file !== undefined) {
+      const data = readFile(rq.file as string, [...rp, "file"]);
+      if (data)
+        body = {
+          kind: "file",
+          data,
+          source: rq.file as string,
+          contentType: ctype ?? guessType(rq.file as string),
+        };
+    } else if (rq.multipart !== undefined) {
+      const parts: Extract<BodySpec, { kind: "multipart" }>["parts"] = [];
+      for (const [name, v] of Object.entries(rq.multipart as Obj)) {
+        if (v && typeof v === "object") {
+          const f = v as { file: string; contentType?: string; filename?: string };
+          const data = readFile(f.file, [...rp, "multipart", name, "file"]);
+          if (data) {
+            parts.push({
+              name,
+              file: data,
+              filename: f.filename ?? path.basename(f.file),
+              contentType: f.contentType ?? guessType(f.file),
+            });
+          }
+        } else parts.push({ name, value: tpl(v, [...rp, "multipart", name], scope, later) });
       }
+      body = { kind: "multipart", parts };
+    }
 
-      const e = v.obj(st.expect, [...p, "expect"], ["status", "maxDuration"], false);
-      let status: number[] | undefined;
-      if (e?.status !== undefined) {
-        const arr = Array.isArray(e.status) ? e.status : [e.status];
-        if (arr.every((x) => Number.isInteger(x) && (x as number) >= 100 && (x as number) <= 599))
-          status = arr as number[];
-        else
-          v.fail(
-            [...p, "expect", "status"],
-            "deve ser um status HTTP (100–599) ou uma lista deles",
-          );
+    const request: RequestSpec = {
+      method,
+      path: tpl(rq.path, [...rp, "path"], scope, later),
+      headers: tplEntries(rq.headers, [...rp, "headers"], scope, later),
+      query,
+      body,
+    };
+
+    const e = (s.expect as Obj) ?? {};
+    const ep: Path = [...p, "expect"];
+    const expect: ExpectSpec = {
+      status:
+        e.status === undefined ? undefined : ([] as number[]).concat(e.status as number | number[]),
+      maxDurationMs:
+        e.maxDuration !== undefined ? parseDuration(e.maxDuration as string) : undefined,
+      jsonPath: [],
+      headers: [],
+      bodyContains:
+        e.bodyContains === undefined ? [] : ([] as string[]).concat(e.bodyContains as string),
+    };
+    for (const [jp, m] of Object.entries((e.jsonPath as Obj) ?? {})) {
+      try {
+        expect.jsonPath.push({ path: jp, segments: parseJsonPath(jp), matcher: parseMatcher(m) });
+      } catch (err) {
+        loc.fail([...ep, "jsonPath", jp], (err as Error).message);
       }
+    }
+    for (const [h, m] of Object.entries((e.headers as Obj) ?? {})) {
+      try {
+        expect.headers.push({ name: h.toLowerCase(), matcher: parseMatcher(m) });
+      } catch (err) {
+        loc.fail([...ep, "headers", h], (err as Error).message);
+      }
+    }
+    if (e.bodyMatches !== undefined) {
+      try {
+        expect.bodyMatches = new RegExp(e.bodyMatches as string);
+      } catch (err) {
+        loc.fail([...ep, "bodyMatches"], `regex inválida: ${(err as Error).message}`);
+      }
+    }
 
-      flow.push({
-        name: v.str(st.name, [...p, "name"], false) ?? `${method} ${path}`,
-        request: {
-          method,
-          path,
-          headers: v.map(r.headers, [...p, "request", "headers"]),
-          query: v.map(r.query, [...p, "request", "query"]),
-          body,
-          contentType,
-        },
-        expect: {
-          status,
-          maxDurationMs: v.duration(e?.maxDuration, [...p, "expect", "maxDuration"]),
-        },
-        thinkMs: v.duration(st.think, [...p, "think"]) ?? 0,
-      });
+    const extract: [string, Extractor][] = [];
+    for (const [name, spec] of Object.entries((s.extract as Obj) ?? {})) {
+      const xp: Path = [...p, "extract", name];
+      try {
+        if (typeof spec === "string") {
+          extract.push([name, { kind: "jsonPath", path: spec, segments: parseJsonPath(spec) }]);
+          continue;
+        }
+        const o = spec as Obj;
+        const which = ["jsonPath", "regex", "header"].filter((k) => o[k] !== undefined);
+        if (which.length !== 1) {
+          loc.fail(xp, "informe exatamente um entre jsonPath, regex e header");
+          continue;
+        }
+        if (o.jsonPath !== undefined) {
+          const jp = o.jsonPath as string;
+          extract.push([
+            name,
+            { kind: "jsonPath", path: jp, segments: parseJsonPath(jp), default: o.default },
+          ]);
+        } else if (o.regex !== undefined) {
+          const re = new RegExp(o.regex as string);
+          const groups = new RegExp(`${re.source}|`).exec("")!.length - 1;
+          const group = (o.group as number | undefined) ?? (groups ? 1 : 0);
+          if (group > groups) loc.fail([...xp, "group"], `a regex tem só ${groups} grupo(s)`);
+          extract.push([name, { kind: "regex", re, group, default: o.default }]);
+        } else {
+          extract.push([
+            name,
+            { kind: "header", name: (o.header as string).toLowerCase(), default: o.default },
+          ]);
+        }
+      } catch (err) {
+        loc.fail(xp, (err as Error).message);
+      }
+    }
+
+    let think = { minMs: 0, maxMs: 0 };
+    if (s.think !== undefined) {
+      const [a, b] = (s.think as string).split("..").map((x) => parseDuration(x.trim()));
+      think = { minMs: a!, maxMs: b ?? a! };
+      if (think.maxMs < think.minMs)
+        loc.fail([...p, "think"], "intervalo invertido (use menor..maior)");
+    }
+
+    return {
+      name: (s.name as string | undefined) ?? `${method} ${rq.path as string}`,
+      label: `${method} ${rq.path as string}`,
+      request,
+      expect,
+      extract,
+      think,
+      needsBody:
+        expect.jsonPath.length > 0 ||
+        expect.bodyContains.length > 0 ||
+        !!expect.bodyMatches ||
+        extract.some(([, x]) => x.kind !== "header"),
+    };
+  };
+
+  const compileFlow = (steps: Obj[], p: Path): Step[] => {
+    const scope = new Set(varScope);
+    const later = new Map<string, number>();
+    steps.forEach((s, i) => {
+      for (const k of Object.keys((s.extract as Obj) ?? {})) if (!later.has(k)) later.set(k, i);
     });
-  }
+    return steps.map((s, i) => {
+      for (const [k, idx] of later) if (idx < i) scope.add(k);
+      const later2 = new Map([...later].filter(([, idx]) => idx >= i));
+      return compileStep(s, [...p, i], scope, later2);
+    });
+  };
 
-  let seed = randomInt(1, 2 ** 31 - 1);
-  if (raw.seed !== undefined) seed = v.posInt(raw.seed, ["seed"]) ?? seed;
+  let flows: Flow[] = [];
+  if (r.flow !== undefined && r.flows !== undefined)
+    loc.fail(["flows"], "use flow (um fluxo) ou flows (vários), não ambos");
+  else if (r.flow !== undefined) {
+    flows = [{ name: "principal", weight: 1, steps: compileFlow(r.flow as Obj[], ["flow"]) }];
+  } else if (r.flows !== undefined) {
+    flows = (r.flows as Obj[]).map((f, i) => ({
+      name: (f.name as string | undefined) ?? `fluxo ${i + 1}`,
+      weight: (f.weight as number | undefined) ?? 1,
+      steps: compileFlow(f.steps as Obj[], ["flows", i, "steps"]),
+    }));
+  } else loc.fail([], "informe flow (lista de etapas) ou flows (fluxos com pesos)");
 
-  if (v.issues.length) throw new ScenarioError(v.issues, file);
+  if (loc.issues.length) throw new ScenarioError(loc.issues, file);
 
   return {
-    name,
-    description,
-    target: { baseUrl: baseUrl.replace(/\/+$/, ""), headers, timeoutMs },
+    name: r.name as string,
+    description: r.description as string | undefined,
+    target,
     load: {
       model: "open",
       stages,
       warmupMs,
-      maxInFlight: v.posInt(l?.maxInFlight, ["load", "maxInFlight"]),
-      connections: v.posInt(l?.connections, ["load", "connections"]),
+      maxInFlight: l.maxInFlight as number | undefined,
+      connections: l.connections as number | undefined,
     },
     thresholds,
-    flow,
-    seed,
-    secrets: [...v.secrets],
+    variables,
+    data: datasets,
+    flows,
+    seed: (r.seed as number | undefined) ?? randomInt(1, 2 ** 31 - 1),
+    secrets: [...secrets],
     sourceFile: file,
   };
 }

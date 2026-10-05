@@ -81,6 +81,7 @@ export type ErrorType =
   | "http_4xx"
   | "http_5xx"
   | "check_failed"
+  | "template_error"
   | "dropped"
   | "aborted"
   | "other";
@@ -111,6 +112,8 @@ export function classifyError(err: unknown): ErrorType {
   return "other";
 }
 
+const MAX_FAILURE_MESSAGES = 20;
+
 export class StepMetrics {
   readonly latency = newHistogram();
   requests = 0;
@@ -119,16 +122,33 @@ export class StepMetrics {
   bytesOut = 0;
   readonly statusCodes: Record<string, number> = {};
   readonly errorsByType: Partial<Record<ErrorType, number>> = {};
+  /** Contagem por checagem (rótulo legível → aprovadas/reprovadas). */
+  readonly checks = new Map<string, { passed: number; failed: number }>();
+  /** Amostra das mensagens de falha mais comuns (limitada para não crescer sem fim). */
+  readonly failures = new Map<string, number>();
 
   constructor(
     readonly name: string,
     readonly method: string,
     readonly path: string,
+    readonly flow = "",
   ) {}
 
-  addError(type: ErrorType): void {
+  addError(type: ErrorType, message?: string): void {
     this.errors++;
     this.errorsByType[type] = (this.errorsByType[type] ?? 0) + 1;
+    if (message) {
+      const n = this.failures.get(message);
+      if (n !== undefined) this.failures.set(message, n + 1);
+      else if (this.failures.size < MAX_FAILURE_MESSAGES) this.failures.set(message, 1);
+    }
+  }
+
+  addCheck(label: string, ok: boolean): void {
+    let c = this.checks.get(label);
+    if (!c) this.checks.set(label, (c = { passed: 0, failed: 0 }));
+    if (ok) c.passed++;
+    else c.failed++;
   }
 }
 

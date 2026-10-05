@@ -94,7 +94,7 @@ export function enforceLimits(scenario: Scenario, limits: Limits): LoadSummary {
   const summary: LoadSummary = {
     peakRps: schedule.peakRps,
     durationMs: schedule.totalMs,
-    expectedRequests: schedule.expectedCount * scenario.flow.length,
+    expectedRequests: Math.round(schedule.expectedCount * avgSteps(scenario)),
     connections,
   };
   const problems: string[] = [];
@@ -116,4 +116,10 @@ export function enforceLimits(scenario: Scenario, limits: Limits): LoadSummary {
   if (problems.length)
     throw new ConfigError(`limites de segurança:\n  - ${problems.join("\n  - ")}`);
   return summary;
+}
+
+/** Requisições por iteração, ponderadas pelo peso de cada fluxo. */
+function avgSteps(sc: Scenario): number {
+  const w = sc.flows.reduce((s, f) => s + f.weight, 0);
+  return w ? sc.flows.reduce((s, f) => s + f.weight * f.steps.length, 0) / w : 0;
 }

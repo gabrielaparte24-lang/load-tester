@@ -11,6 +11,17 @@ export * from "./report.js";
 export * from "./runner.js";
 export * from "./scenario/types.js";
 export * from "./scenario/load.js";
+export * from "./scenario/schema.js";
+export * from "./scenario/template.js";
+export * from "./scenario/jsonpath.js";
+export * from "./scenario/matchers.js";
+export * from "./scenario/csv.js";
+export * from "./scenario/random.js";
+export * from "./scenario/execute.js";
+export * from "./scenario/preview.js";
+export * from "./scenario/init.js";
+export * from "./importers/curl.js";
+export * from "./importers/openapi.js";
 
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);

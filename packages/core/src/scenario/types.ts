@@ -1,30 +1,72 @@
 import type { RateStage } from "../schedule.js";
+import type { Segment } from "./jsonpath.js";
+import type { Matcher } from "./matchers.js";
+import type { JsonTemplate, Template } from "./template.js";
 
 export const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
 export type HttpMethod = (typeof HTTP_METHODS)[number];
 
+export type BodySpec =
+  | { kind: "text"; template: Template; contentType?: string }
+  | { kind: "json"; value: JsonTemplate; contentType: string }
+  | { kind: "form"; fields: [string, Template][]; contentType: string }
+  | { kind: "file"; data: Buffer; contentType: string; source: string }
+  | {
+      kind: "multipart";
+      parts: (
+        | { name: string; value: Template }
+        | { name: string; file: Buffer; filename: string; contentType: string }
+      )[];
+    };
+
 export interface RequestSpec {
   method: HttpMethod;
-  path: string;
-  headers: Record<string, string>;
-  query: Record<string, string>;
-  /** Corpo já serializado e o content-type correspondente. */
-  body?: string;
-  contentType?: string;
+  path: Template;
+  headers: [string, Template][];
+  query: [string, Template][];
+  body?: BodySpec;
 }
 
 export interface ExpectSpec {
   /** Status aceitos; se ausente, qualquer status < 400 é sucesso. */
   status?: number[];
-  /** Tempo máximo de resposta; acima disso conta como falha de checagem. */
   maxDurationMs?: number;
+  jsonPath: { path: string; segments: Segment[]; matcher: Matcher }[];
+  headers: { name: string; matcher: Matcher }[];
+  bodyContains: string[];
+  bodyMatches?: RegExp;
 }
+
+export type Extractor =
+  | { kind: "jsonPath"; path: string; segments: Segment[]; default?: unknown }
+  | { kind: "regex"; re: RegExp; group: number; default?: unknown }
+  | { kind: "header"; name: string; default?: unknown };
 
 export interface Step {
   name: string;
   request: RequestSpec;
   expect: ExpectSpec;
-  thinkMs: number;
+  extract: [string, Extractor][];
+  /** Tempo de pensamento após a etapa: fixo (min = max) ou uniforme em [min, max]. */
+  think: { minMs: number; maxMs: number };
+  /** A resposta precisa ser lida (checagens de corpo ou extração). */
+  needsBody: boolean;
+  /** Texto do método + caminho original (para relatórios). */
+  label: string;
+}
+
+export interface Flow {
+  name: string;
+  weight: number;
+  steps: Step[];
+}
+
+export interface Dataset {
+  file: string;
+  name?: string;
+  order: "sequential" | "random";
+  columns: string[];
+  rows: Record<string, string>[];
 }
 
 export interface Scenario {
@@ -32,7 +74,7 @@ export interface Scenario {
   description?: string;
   target: {
     baseUrl: string;
-    headers: Record<string, string>;
+    headers: [string, Template][];
     timeoutMs: number;
   };
   load: {
@@ -46,7 +88,9 @@ export interface Scenario {
     connections?: number;
   };
   thresholds: string[];
-  flow: Step[];
+  variables: [string, Template][];
+  data: Dataset[];
+  flows: Flow[];
   seed: number;
   /** Valores vindos de ${env.X}: tratados como segredos e mascarados nas saídas. */
   secrets: string[];

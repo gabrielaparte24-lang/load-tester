@@ -8,7 +8,15 @@ export const REPORT_SCHEMA_VERSION = 1;
 
 export type RunStatus = "completed" | "interrupted" | "failed";
 
+export interface CheckReport {
+  name: string;
+  passed: number;
+  failed: number;
+}
+
 export interface StepReport {
+  /** Nome do fluxo (vazio quando o cenário tem um único fluxo). */
+  flow: string;
   name: string;
   method: string;
   path: string;
@@ -19,6 +27,9 @@ export interface StepReport {
   statusCodes: Record<string, number>;
   errorsByType: Partial<Record<ErrorType, number>>;
   bytes: { received: number; sent: number };
+  checks: CheckReport[];
+  /** Mensagens de falha mais frequentes (amostra, até 20 distintas). */
+  failures: { message: string; count: number }[];
 }
 
 export interface TimelinePoint {
@@ -63,6 +74,9 @@ export interface RunReport {
       maxInFlight: number;
     };
     thresholds: string[];
+    flows: { name: string; weight: number; steps: string[] }[];
+    data: { file: string; name?: string; order: string; rows: number; columns: string[] }[];
+    variables: string[];
   };
   summary: {
     /** Janela medida (sem aquecimento), em ms. */
@@ -86,6 +100,7 @@ export interface RunReport {
     statusCodes: Record<string, number>;
     errorsByType: Partial<Record<ErrorType, number>>;
     bytes: { received: number; sent: number };
+    checks: { passed: number; failed: number };
   };
   steps: StepReport[];
   timeline: TimelinePoint[];
