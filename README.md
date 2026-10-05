@@ -8,11 +8,11 @@ CLI + (em breve) dashboard em tempo real + relatórios reproduzíveis, com métr
 > `localhost`/`127.0.0.1`/`::1` e nas faixas de `ALLOWED_TARGETS`; qualquer outro host exige
 > `--i-own-this-target` **e** confirmação explícita do hostname.
 
-**Estado:** Fases 0 a 3 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
+**Estado:** Fases 0 a 4 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
 relatório JSON e cenários completos (JSON Schema, templates, CSV, encadeamento, checagens, pesos,
 `lt init`, importação de cURL/OpenAPI), motor multi-núcleo com modelos aberto e fechado, perfis,
 tempos por fase, HTTP/2, detecção de saturação, benchmarks A/B com significância estatística e
-baselines de regressão. Veja o [roadmap](#roadmap).
+baselines de regressão, relatórios HTML/CSV/Markdown/JUnit/Prometheus e exemplo de CI. Veja o [roadmap](#roadmap).
 
 ## Requisitos
 
@@ -84,7 +84,8 @@ npx lt validate examples/*.yaml              # valida sem executar (--preview N 
 Durante a execução há uma linha de progresso por segundo; **Ctrl+C** para de agendar e drena as
 requisições em andamento (até 5 s) e salva o relatório parcial; um segundo Ctrl+C força a saída.
 
-Opções de `lt run`: `--out <dir>`, `--quiet`, `--workers <n|auto>`, `--no-system-metrics`,
+Opções de `lt run`: `--out <dir>`, `--report-dir <dir>`, `--format <lista>`, `--quiet`, `--workers <n|auto>`,
+`--no-system-metrics`, `--metrics-port <porta>`, `--baseline`, `--baseline-file <arq>`, `--save-baseline`,
 `--max-rps <n>`, `--max-connections <n>`, `--max-vus <n>`, `--i-own-this-target`,
 `--confirm-target <host>` (confirmação não interativa para CI).
 
@@ -473,30 +474,52 @@ máquina. `--no-system-metrics` desliga a coleta.
 | fechado, 20 VUs, ciclo de 100 ms      | ≈ 200 req/s        | 196–200 req/s no platô; rampa 5→20→1 VUs        |
 | fechado com `--max-rps 300`           | ≤ teto             | 309,5 req/s (rajada inicial tolerada) + aviso   |
 
-## Relatório JSON (`schemaVersion: 1`)
+## Relatórios
 
-Gravado em `reports/<AAAAMMDD-HHMMSS>-<cenário>/report.json`. Campos principais:
+Cada execução grava uma pasta `reports/<AAAAMMDD-HHMMSS>-<cenário>/`, ou a pasta exata de
+`--report-dir`, com:
 
-- `run`: id, status (`completed` | `interrupted` | `failed`), `model` (`open` | `closed`), início/fim,
-  seed, `invalid` + motivos, avisos e, quando `stopWhen` encerrou o teste, `stopReason` e `breakingPoint`.
-- `config`: alvo (headers mascarados, `http2`), carga (`stages` ou `vuStages`, `pacingMs`, aquecimento,
-  conexões, `workers`, `stopWhen`), thresholds, `flows`
-  (nome, peso, etapas), `data` (arquivo, ordem, linhas, colunas) e nomes de `variables`.
-- `summary`: janela medida, requisições ok/falhas, iterações (agendadas/iniciadas/concluídas/descartadas),
-  `errorRate` (0..1), `rps` (pedida — `null` no fechado —, enviada, concluída), `maxConcurrency`,
-  `latencyMs`, `serviceTimeMs`, `ttfbMs`, `downloadMs`
-  (`count, min, mean, stdev, p50, p75, p90, p95, p99, p999, max`), status HTTP, erros por tipo
-  (`timeout`, `connection_refused`, `connection_reset`, `dns`, `http_4xx`, `http_5xx`, `check_failed`,
-  `template_error`, …), bytes, `checks` (aprovadas/reprovadas) e `connections` (abertas, `byProtocol`,
-  `dnsMs`/`connectMs`/`tlsMs` por conexão nova).
-- `steps[]`: as mesmas métricas por etapa (`flow` + `name`), `checks[]` (nome, aprovadas, reprovadas) e
-  `failures[]` (mensagens de falha mais frequentes, até 20 distintas, já mascaradas).
-- `timeline[]`: por segundo — taxa pedida/enviada/concluída, erros, `concurrency` (iterações
-  simultâneas ou VUs ativos), p50/p95/p99/máx e, com a coleta ativa, `cpu`/`memPct` da máquina.
-- `thresholds[]`: expressão, valor medido, aprovado.
-- `generator`: `workers`, atraso de agendamento, atraso do event loop, CPU dos motores, `throttled`.
-- `machine`: CPU média/máxima e memória da máquina e do processo (`null` com `--no-system-metrics`).
-- `histograms.latencyUs`: HdrHistogram base64 comprimido.
+- **`report.html`**: relatório autocontido, que abre offline e não depende de rede. Traz status,
+  indicadores, thresholds e comparação com a baseline. Os gráficos por segundo têm crosshair e
+  tooltip (também por teclado): latência p50/p95/p99, vazão pedida × enviada, erros, concorrência e
+  CPU. Inclui ainda a distribuição (percentis em escala de "noves" e histograma), as etapas, as falhas
+  mais comuns, as fases da requisição e a tabela por segundo. Tema claro/escuro.
+- **`report.json`**: formato estável (`schemaVersion: 1`, só mudanças aditivas), documentado campo a
+  campo em [docs/relatorios.md](docs/relatorios.md).
+- **`timeline.csv`** e **`steps.csv`**, **`summary.md`** (para colar em PR), **`junit.xml`**
+  (thresholds, validade e regressões como testes) e, com `--format all`, **`metrics.prom`** (texto do
+  Prometheus).
+
+```bash
+npx lt run cenarios/api.yaml --format html,md          # escolhe os formatos (padrão: json,html,csv,md,junit)
+npx lt run cenarios/api.yaml --report-dir reports/ci/api   # pasta fixa (CI)
+npx lt run cenarios/api.yaml --metrics-port 9464       # Prometheus ao vivo em 127.0.0.1:9464/metrics
+npx lt report reports/<id> --format all                # regenera a partir do report.json/bench.json
+```
+
+`lt bench` gera `bench.html` (resumo, comparação A × B, p95 por rodada na ordem de execução e links
+para o relatório de cada rodada), `bench.csv` e `summary.md`.
+
+## CI (GitHub Actions)
+
+[examples/ci.yml](examples/ci.yml) é um workflow completo:
+
+1. setup;
+2. sobe o alvo;
+3. smoke e carga com thresholds;
+4. baseline versionada opcional (`--baseline-file`);
+5. resumo em Markdown na página do job (`$GITHUB_STEP_SUMMARY`);
+6. relatórios como artefato e JUnit opcional.
+
+O job falha pelos exit codes: `1` threshold ou regressão, `2` configuração, `3` gerador saturado.
+
+```bash
+npx lt run cenario.yaml --report-dir reports/ci/x --quiet --baseline-file ci/baselines/x.json
+cat reports/ci/x/summary.md >> "$GITHUB_STEP_SUMMARY"
+```
+
+Baselines só são comparáveis na **mesma máquina/ambiente**. Gere a baseline versionada no próprio
+runner (ou numa máquina equivalente) e, se possível, a partir de `lt bench`.
 
 ## Alvo de demonstração
 
@@ -542,6 +565,6 @@ Estrutura: `packages/core` (motor, métricas, cenários), `packages/cli` (`lt`),
 - [x] **Fase 2** — `worker_threads`, modelo fechado, perfis (smoke/load/stress/spike/soak), tempos de
       DNS/conexão/TLS/TTFB, HTTP/2, detecção ampliada de saturação, CPU/memória.
 - [x] **Fase 3** — `lt bench`, A/B, `lt compare` com significância estatística, baseline.
-- [ ] **Fase 4** — relatórios HTML/CSV/Markdown, JUnit, Prometheus, exemplo de GitHub Actions.
+- [x] **Fase 4** — relatórios HTML/CSV/Markdown, JUnit, Prometheus, exemplo de GitHub Actions.
 - [ ] **Fase 5** — API completa, SQLite, tempo real (SSE/WebSocket), dashboard React.
 - [ ] **Extras** — WebSocket e gRPC como alvo.

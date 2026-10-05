@@ -1,0 +1,86 @@
+# Exemplo de workflow do GitHub Actions (copie para .github/workflows/performance.yml).
+#
+# O que faz em cada pull request:
+#   1. instala e compila o lt;
+#   2. sobe o alvo (aqui o demo-target; troque pelo seu serviço — veja "Sobe o alvo");
+#   3. roda um smoke test e um teste de carga com thresholds (violação → job falha, exit 1);
+#   4. compara com a baseline versionada no repositório, se existir (regressão → exit 1);
+#   5. publica o resumo em Markdown na página do job e guarda os relatórios como artefato.
+#
+# Exit codes do lt: 0 ok · 1 thresholds/regressão · 2 configuração · 3 gerador saturado · 130 interrompido.
+#
+# Segurança: o runner do CI só testa o que estiver em localhost/ALLOWED_TARGETS. Para um ambiente
+# de homologação SEU, defina ALLOWED_TARGETS (ou use --i-own-this-target --confirm-target <host>).
+# Tokens vêm de secrets do repositório como variáveis de ambiente (${env.API_TOKEN} no cenário) e
+# são mascarados nos relatórios.
+
+name: performance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Ex.: alvo de homologação na rede privada do runner self-hosted
+      # ALLOWED_TARGETS: 10.0.0.0/8
+      API_TOKEN: ${{ secrets.API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Instala e compila
+        run: npm run setup
+
+      - name: Sobe o alvo
+        # Troque pelo seu serviço (docker compose up -d, npm start do app etc.) e espere ficar saudável.
+        run: npm start -- --with-demo
+
+      - name: Smoke
+        run: npx lt run examples/perfis/smoke.yaml --report-dir reports/ci/smoke --quiet
+
+      - name: Carga com thresholds (e baseline, se existir)
+        run: |
+          BASELINE=ci/baselines/validate-slow-100ms.json
+          if [ -f "$BASELINE" ]; then EXTRA="--baseline-file $BASELINE --regression-threshold 10%"; fi
+          npx lt run examples/slow-100ms.yaml --report-dir reports/ci/load --quiet $EXTRA
+
+      - name: Resumo na página do job
+        if: always()
+        run: |
+          for f in reports/ci/*/summary.md; do [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"; done
+
+      - name: Guarda os relatórios (HTML, JSON, CSV, JUnit)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorios-de-carga
+          path: reports/ci
+          retention-days: 14
+
+      # Opcional: mostra os thresholds como testes na aba "Checks" (ação de terceiros).
+      # - name: Publica JUnit
+      #   if: always()
+      #   uses: mikepenz/action-junit-report@v5
+      #   with:
+      #     report_paths: reports/ci/*/junit.xml
+
+      - name: Para os serviços
+        if: always()
+        run: npm run stop
+
+# Para criar/atualizar a baseline versionada (rode localmente, na branch principal, na mesma
+# máquina/ambiente usado no CI — baselines de máquinas diferentes não são comparáveis):
+#   npx lt run examples/slow-100ms.yaml --report-dir ci/baselines/tmp
+#   cp ci/baselines/tmp/report.json ci/baselines/validate-slow-100ms.json && git add ci/baselines
+# Para uma baseline mais robusta, use um benchmark: npx lt bench <cenário> --runs 7 e versione o bench.json.
