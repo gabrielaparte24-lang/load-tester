@@ -649,7 +649,7 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
   };
 }
 
-export function loadScenarioFile(file: string): Scenario {
+export function loadScenarioFile(file: string, opts: ParseOptions = {}): Scenario {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf8");
@@ -659,5 +659,5 @@ export function loadScenarioFile(file: string): Scenario {
     );
   }
   // JSON é YAML válido: o mesmo parser atende .yaml/.yml/.json com linha/coluna nos erros
-  return parseScenario(text, file);
+  return parseScenario(text, file, opts);
 }

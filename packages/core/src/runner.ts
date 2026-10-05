@@ -156,6 +156,7 @@ function inWorker(
       file: sc.source.file,
       baseDir: sc.source.baseDir,
       seed: sc.seed,
+      baseUrl: sc.target.baseUrl,
     },
     config: cfg,
   };

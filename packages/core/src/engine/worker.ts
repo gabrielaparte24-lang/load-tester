@@ -13,6 +13,7 @@ try {
     baseDir: init.scenario.baseDir,
     seed: init.scenario.seed,
   });
+  sc.target.baseUrl = init.scenario.baseUrl;
   const engine = new Engine(sc, init.config, (bucket) => post({ type: "bucket", bucket }));
   port.on("message", (msg: ToWorker) => {
     if (msg.type === "start") {

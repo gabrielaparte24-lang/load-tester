@@ -61,7 +61,8 @@ export interface EngineResult {
 }
 
 export interface WorkerInit {
-  scenario: { text: string; file?: string; baseDir: string; seed: number };
+  /** baseUrl efetiva (pode diferir do texto, ex.: lt bench --ab-target). */
+  scenario: { text: string; file?: string; baseDir: string; seed: number; baseUrl: string };
   config: EngineConfig;
 }
 
