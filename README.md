@@ -8,10 +8,11 @@ CLI + (em breve) dashboard em tempo real + relatórios reproduzíveis, com métr
 > `localhost`/`127.0.0.1`/`::1` e nas faixas de `ALLOWED_TARGETS`; qualquer outro host exige
 > `--i-own-this-target` **e** confirmação explícita do hostname.
 
-**Estado:** Fases 0, 1 e 2 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
+**Estado:** Fases 0 a 3 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
 relatório JSON e cenários completos (JSON Schema, templates, CSV, encadeamento, checagens, pesos,
 `lt init`, importação de cURL/OpenAPI), motor multi-núcleo com modelos aberto e fechado, perfis,
-tempos por fase, HTTP/2 e detecção de saturação. Veja o [roadmap](#roadmap).
+tempos por fase, HTTP/2, detecção de saturação, benchmarks A/B com significância estatística e
+baselines de regressão. Veja o [roadmap](#roadmap).
 
 ## Requisitos
 
@@ -327,6 +328,99 @@ demo-target também escuta h2c em `LT_DEMO_PORT + 1` (4101). Certificados são *
 para uma CA própria use `target.tls.ca: ./minha-ca.pem`. O protocolo negociado aparece em
 `summary.connections.byProtocol`.
 
+## Benchmarking e comparação
+
+### `lt bench`: N rodadas do mesmo cenário
+
+```bash
+npx lt bench cenarios/api.yaml --runs 7 --interval 10s
+```
+
+Roda o cenário N vezes (mínimo 5), com pausa entre rodadas, e resume cada métrica com **mediana**,
+**IC 95% da mediana** (bootstrap), mínimo, máximo e **CV entre rodadas**. O CV é a variabilidade do
+ambiente: diferenças menores que ela dificilmente serão detectáveis, e o relatório avisa quando o CV do
+p95 passa de 10%. Rodadas inválidas (gerador saturado) ou interrompidas são excluídas da estatística e
+listadas. Todas as rodadas usam a mesma semente, ou seja, os mesmos dados. Cada rodada gera seu
+`report.json`, e o resumo fica em `reports/<id>/bench.json`.
+
+### A/B: duas versões ou configurações
+
+```bash
+npx lt bench cenarios/api.yaml --ab-target http://127.0.0.1:8081 --runs 7   # mesmo cenário, outra URL
+npx lt bench cenarios/v1.yaml --ab cenarios/v2.yaml --runs 7 --fail-on-regression
+```
+
+As rodadas são **alternadas em pares contrabalançados** (A B, B A, A B…) para que aquecimento de cache,
+JIT e deriva da máquina não favoreçam um lado. Os dois grupos recebem a mesma semente (mesmos dados).
+
+### `lt compare`: diferença real ou ruído?
+
+```bash
+npx lt compare reports/<id-A> reports/<id-B>           # duas execuções (ou dois bench.json)
+npx lt compare reports/<bench-ab>                      # o A × B de um benchmark
+npx lt compare A B --alpha 0.05 --min-effect 5% --json --fail-on-regression
+```
+
+Exemplo real (A/B com 5 ms a mais em B, 5 rodadas cada):
+
+```text
+  métrica                  A          B           Δ       Δ%  IC95% (B−A)            p (Holm)  veredito
+  latência p50 ms      21.20      26.08       +4.88   +23.0%  [+4.16, +5.94]            0.040  PIOR
+  latência p95 ms      22.57      26.98       +4.40   +19.5%  [+1.57, +8.37]            0.040  PIOR
+  latência p99 ms      23.74      27.87       +4.13   +17.4%  [-2.02, +9.38]            0.167  sem diferença
+  vazão req/s          50.00      50.00        0.00     0.0%  [0.00, 0.00]              1.000  sem diferença
+  taxa de erro         0.00%      0.00%     0.00 pp        —  [0.00 pp, 0.00 pp]        1.000  sem diferença
+  Conclusão: REGRESSÃO em B: latência p50, latência p95
+```
+
+Como a decisão é tomada (e por quê):
+
+- **Unidade de análise.** Requisições de uma mesma execução **não são independentes**: uma execução
+  lenta deixa milhares de requisições lentas ao mesmo tempo. Testar requisição contra requisição
+  declararia "significativa" qualquer flutuação. Por isso:
+  - **benchmarks:** cada **rodada** é uma amostra;
+  - **execuções únicas:** a amostra é um **bloco de 5 s** da linha do tempo (`--block`). Sem rodadas
+    repetidas, a variação entre execuções é desconhecida, e o resultado avisa isso.
+- **Teste:** Mann-Whitney U, não paramétrico, porque latências não seguem distribuição normal. É
+  **exato** (enumeração das permutações dos postos, com empates) quando viável e usa aproximação normal
+  com correção de empates nos demais casos. A **taxa de erro** de execuções únicas usa o teste z de duas
+  proporções.
+- **Tamanho do efeito:** deslocamento de Hodges-Lehmann e **IC 95% da diferença** por bootstrap, com
+  semente fixa (reprodutível).
+- **Várias métricas:** p50, p95, p99, vazão e erros são corrigidos por **Holm**, para que "alguma
+  métrica mudou" não apareça por acaso.
+- **Veredito:**
+  - **PIOR** ou **MELHOR**: p ajustado < α **e** efeito ≥ `--min-effect` (5%; para latência, também ≥ 1 ms;
+    para erros, ≥ 0,5 ponto percentual);
+  - **diferença pequena**: significativa, mas abaixo do efeito mínimo;
+  - **sem diferença detectável**: sem evidência. O lt diz isso explicitamente em vez de chamar ruído
+    de melhora.
+- **Poder estatístico:** com 5 × 5 rodadas, o menor p exato possível é 2/252 e, após Holm, ~0,04. Ou
+  seja, só uma separação completa entre os grupos é detectável, e o resultado avisa isso. Com α menor
+  que esse piso, o resultado diz que nenhuma diferença pode ser declarada. **Use 7–10 rodadas** para
+  diferenças sutis.
+
+Validação: um teste A/A (o mesmo alvo dos dois lados) precisa dar "sem diferença" e um A/B com +15 ms
+precisa dar PIOR, com o IC contendo o valor real. Os dois rodam na suíte automatizada contra o demo-target.
+
+### Baseline e regressão no CI
+
+```bash
+npx lt run cenarios/api.yaml --save-baseline                # salva se a execução passou
+npx lt baseline set reports/<id>                            # ou marca qualquer execução / bench.json
+npx lt run cenarios/api.yaml --baseline --regression-threshold 10%   # regressão → exit 1
+npx lt baseline list | show <cenário> | clear <cenário>
+```
+
+Há uma baseline por cenário (pelo nome), em `data/baselines/`.
+
+- **Baseline de uma execução:** usa a comparação por blocos descrita acima. Há regressão quando a piora
+  é significativa **e** maior que o limite.
+- **Baseline de um `bench.json`:** a execução atual regride quando fica pior que a mediana das rodadas
+  além do limite **e** fora da faixa observada (mínimo/máximo).
+
+Execuções inválidas ou interrompidas não viram baseline.
+
 ## Como as métricas são medidas
 
 **Chegadas no modelo aberto.** As chegadas seguem um cronograma determinístico calculado a partir da taxa
@@ -447,7 +541,7 @@ Estrutura: `packages/core` (motor, métricas, cenários), `packages/cli` (`lt`),
       pesos, `lt init`, import cURL/OpenAPI.
 - [x] **Fase 2** — `worker_threads`, modelo fechado, perfis (smoke/load/stress/spike/soak), tempos de
       DNS/conexão/TLS/TTFB, HTTP/2, detecção ampliada de saturação, CPU/memória.
-- [ ] **Fase 3** — `lt bench`, A/B, `lt compare` com significância estatística, baseline.
+- [x] **Fase 3** — `lt bench`, A/B, `lt compare` com significância estatística, baseline.
 - [ ] **Fase 4** — relatórios HTML/CSV/Markdown, JUnit, Prometheus, exemplo de GitHub Actions.
 - [ ] **Fase 5** — API completa, SQLite, tempo real (SSE/WebSocket), dashboard React.
 - [ ] **Extras** — WebSocket e gRPC como alvo.
