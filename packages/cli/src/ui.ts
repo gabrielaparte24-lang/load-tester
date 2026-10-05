@@ -1,5 +1,14 @@
 import readline from "node:readline/promises";
-import { formatDuration, type ProgressSnapshot, type RunReport } from "@lt/core";
+import {
+  formatDuration,
+  type BenchGroup,
+  type BenchReport,
+  type ComparisonResult,
+  type MetricComparison,
+  type ProgressSnapshot,
+  type RunReport,
+  type Verdict,
+} from "@lt/core";
 
 const color = process.stdout.isTTY && !process.env.NO_COLOR;
 const wrap = (code: number) => (s: string | number) =>
@@ -165,4 +174,94 @@ export async function ask(question: string): Promise<string> {
   } finally {
     rl.close();
   }
+}
+
+const VERDICT: Record<Verdict, (s: string) => string> = {
+  pior: (s) => c.red(c.bold(s.toUpperCase())),
+  melhor: (s) => c.green(c.bold(s.toUpperCase())),
+  pequena: () => c.yellow("diferença pequena"),
+  "sem diferença": (s) => c.dim(s),
+  "amostra insuficiente": (s) => c.yellow(s),
+};
+
+function fmtVal(v: number, unit: MetricComparison["unit"]): string {
+  if (!Number.isFinite(v)) return "—";
+  if (unit === "%") return `${(v * 100).toFixed(2)}%`;
+  return v.toFixed(2);
+}
+
+function fmtDelta(v: number, unit: MetricComparison["unit"]): string {
+  if (!Number.isFinite(v)) return "—";
+  const sign = v > 0 ? "+" : "";
+  return unit === "%" ? `${sign}${(v * 100).toFixed(2)} pp` : `${sign}${v.toFixed(2)}`;
+}
+
+export function printComparison(r: ComparisonResult): void {
+  const out: string[] = [];
+  out.push(
+    `  A: ${r.a.id} (${r.a.scenario}, n=${r.a.n})   B: ${r.b.id} (${r.b.scenario}, n=${r.b.n})`,
+  );
+  out.push(c.dim(`  Método: ${r.method}`));
+  out.push(
+    `  ${"métrica".padEnd(15)}${"A".padStart(11)}${"B".padStart(11)}${"Δ".padStart(12)}${"Δ%".padStart(9)}  ${"IC95% (B−A)".padEnd(22)}${"p (Holm)".padStart(9)}  veredito`,
+  );
+  for (const m of r.metrics) {
+    const ci = Number.isFinite(m.ci.lo)
+      ? `[${fmtDelta(m.ci.lo, m.unit)}, ${fmtDelta(m.ci.hi, m.unit)}]`
+      : "—";
+    const p = Number.isFinite(m.pAdj) ? (m.pAdj < 0.001 ? "<0.001" : m.pAdj.toFixed(3)) : "—";
+    out.push(
+      `  ${(m.label + (m.unit === "ms" ? " ms" : m.unit === "req/s" ? " req/s" : "")).padEnd(15)}` +
+        `${fmtVal(m.a, m.unit).padStart(11)}${fmtVal(m.b, m.unit).padStart(11)}` +
+        `${fmtDelta(m.delta, m.unit).padStart(12)}` +
+        `${(m.deltaPct === null ? "—" : `${m.deltaPct > 0 ? "+" : ""}${m.deltaPct.toFixed(1)}%`).padStart(9)}  ` +
+        `${ci.padEnd(22)}${p.padStart(9)}  ${VERDICT[m.verdict](m.verdict)}`,
+    );
+  }
+  const concl = r.regression
+    ? c.red(c.bold(r.conclusion))
+    : r.improvement
+      ? c.green(r.conclusion)
+      : r.conclusion;
+  out.push(`  Conclusão: ${concl}`);
+  for (const w of r.warnings) out.push(c.yellow(`  ! ${w}`));
+  console.log(out.join("\n"));
+}
+
+export function printBench(r: BenchReport, file: string): void {
+  const out: string[] = [""];
+  const st = r.bench.status === "completed" ? c.green("concluído") : c.yellow("INTERROMPIDO");
+  out.push(
+    `${c.bold(r.bench.id)}  ${st}  ${r.bench.mode === "ab" ? "A/B" : "rodadas"}: ${r.bench.order.join(" ")}  ${c.dim(`(seed ${r.bench.seed})`)}`,
+  );
+  for (const g of r.groups) {
+    out.push(c.bold(`  ${r.groups.length > 1 ? `${g.label}: ` : ""}${g.scenario} → ${g.baseUrl}`));
+    out.push(
+      `    ${"métrica".padEnd(14)}${"mediana".padStart(10)}  ${"IC95% da mediana".padEnd(22)}${"mín".padStart(9)}${"máx".padStart(9)}${"CV".padStart(8)}`,
+    );
+    const rows: [string, keyof BenchGroup["summary"], boolean][] = [
+      ["p50 ms", "p50", false],
+      ["p95 ms", "p95", false],
+      ["p99 ms", "p99", false],
+      ["vazão req/s", "rps", false],
+      ["erros", "errorRate", true],
+    ];
+    for (const [label, k, isPct] of rows) {
+      const s = g.summary[k];
+      if (!s.n) continue;
+      const f = (v: number) => (isPct ? `${(v * 100).toFixed(2)}%` : v.toFixed(2));
+      out.push(
+        `    ${label.padEnd(14)}${f(s.median).padStart(10)}  ${`[${f(s.ci95.lo)}, ${f(s.ci95.hi)}]`.padEnd(22)}` +
+          `${f(s.min).padStart(9)}${f(s.max).padStart(9)}${`${s.cvPct.toFixed(1)}%`.padStart(8)}`,
+      );
+    }
+    out.push(c.dim(`    ${g.summary.p50.n} rodada(s) válida(s) de ${g.runs.length}`));
+  }
+  console.log(out.join("\n"));
+  if (r.comparison) {
+    console.log(c.bold("\n  Comparação A × B"));
+    printComparison(r.comparison);
+  }
+  for (const w of r.warnings) console.log(c.yellow(`  ! ${w}`));
+  console.log(`  Relatório    ${file}`);
 }

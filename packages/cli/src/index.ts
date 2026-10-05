@@ -1,26 +1,35 @@
 #!/usr/bin/env node
-import fs from "node:fs";
 import path from "node:path";
-import { Command, InvalidArgumentError } from "commander";
+import { Command } from "commander";
 import {
-  ConfigError,
   ExitCode,
   LtError,
   RESPONSIBLE_USE_NOTICE,
   VERSION,
-  checkTarget,
-  enforceLimits,
+  checkBaseline,
   formatDuration,
+  getBaseline,
   getConfig,
   loadScenarioFile,
-  resolveWorkers,
   resolveInside,
+  resolveWorkers,
   runScenario,
+  setBaseline,
   writeJsonReport,
-  type RunReport,
 } from "@lt/core";
+import { registerBenchCommands } from "./bench-commands.js";
+import {
+  RunControl,
+  addCommonRunOptions,
+  authorize,
+  exitCodeFor,
+  limitsFrom,
+  percentArg,
+  progressPrinter,
+  type CommonRunFlags,
+} from "./run-support.js";
 import { registerScenarioCommands } from "./scenario-commands.js";
-import { ask, c, printSummary, progressLine } from "./ui.js";
+import { c, printComparison, printSummary } from "./ui.js";
 
 // Saída fechada (ex.: `lt run x.yaml | head`) não pode derrubar um teste em andamento nem o relatório.
 for (const stream of [process.stdout, process.stderr]) {
@@ -29,125 +38,22 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
-const positiveInt = (v: string) => {
-  const n = Number(v);
-  if (!Number.isInteger(n) || n <= 0)
-    throw new InvalidArgumentError("deve ser um inteiro positivo");
-  return n;
-};
-
-const workersArg = (v: string): number | "auto" => (v === "auto" ? "auto" : positiveInt(v));
-
-interface RunFlags {
+interface RunFlags extends CommonRunFlags {
   out?: string;
-  iOwnThisTarget?: boolean;
-  confirmTarget?: string;
-  maxRps?: number;
-  maxConnections?: number;
-  maxVus?: number;
-  workers?: number | "auto";
-  systemMetrics?: boolean;
-  quiet?: boolean;
-}
-
-export function exitCodeFor(r: RunReport): number {
-  if (r.run.status === "interrupted") return ExitCode.INTERRUPTED;
-  if (r.run.invalid) return ExitCode.INVALID_RUN;
-  if (r.thresholds.some((t) => !t.passed)) return ExitCode.THRESHOLDS_FAILED;
-  return ExitCode.OK;
+  baseline?: boolean;
+  regressionThreshold: number;
+  saveBaseline?: boolean;
 }
 
 async function runCommand(file: string, flags: RunFlags): Promise<number> {
   const cfg = getConfig();
   const scenario = loadScenarioFile(file);
-  const limits = {
-    maxRps: flags.maxRps ?? cfg.maxRps,
-    maxConnections: flags.maxConnections ?? cfg.maxConnections,
-    maxDurationMs: cfg.maxDurationMs,
-    maxVus: flags.maxVus ?? cfg.maxVus,
-  };
-  const load = enforceLimits(scenario, limits);
-
-  const target = await checkTarget(scenario.target.baseUrl, cfg.allowedTargets);
-  if (!target.allowed) {
-    if (!flags.iOwnThisTarget) {
-      throw new ConfigError(
-        `alvo "${target.host}" ${target.reason}.\n` +
-          `  ${RESPONSIBLE_USE_NOTICE}\n` +
-          `  Se o sistema é seu (ou você tem autorização por escrito), repita com --i-own-this-target,\n` +
-          `  ou adicione o host/faixa em ALLOWED_TARGETS no .env.`,
-      );
-    }
-    console.log(c.yellow(`\n⚠ ALVO FORA DA ALLOWLIST\n  ${RESPONSIBLE_USE_NOTICE}`));
-    console.log(
-      `  Host:        ${target.host} (${target.addresses.join(", ") || "sem IP resolvido"})`,
-    );
-    console.log(
-      load.model === "open"
-        ? `  Taxa máxima: ${load.peakRps} rps   Duração: ${formatDuration(load.durationMs)}   ~${load.expectedRequests} requisições`
-        : `  VUs: até ${load.peakVus} (teto de ${load.peakRps} rps)   Duração: ${formatDuration(load.durationMs)}`,
-    );
-    if (flags.confirmTarget !== undefined) {
-      if (flags.confirmTarget.toLowerCase() !== target.host) {
-        throw new ConfigError(
-          `--confirm-target "${flags.confirmTarget}" não confere com o host "${target.host}"`,
-        );
-      }
-    } else if (process.stdin.isTTY) {
-      const typed = await ask(`  Digite o host (${target.host}) para confirmar: `);
-      if (typed.toLowerCase() !== target.host)
-        throw new ConfigError("confirmação não confere; execução cancelada");
-    } else {
-      throw new ConfigError(
-        `terminal não interativo: confirme com --confirm-target ${target.host}`,
-      );
-    }
-  }
-
+  const limits = limitsFrom(flags);
+  const load = await authorize(scenario, flags, limits);
   const reportsDir = flags.out ? resolveInside(cfg.root, flags.out, "--out") : cfg.reportsDir;
+  const baseline = flags.baseline ? getBaseline(cfg.dataDir, scenario.name) : null;
 
-  const stopper = new AbortController();
-  let sigints = 0;
-  const onSigint = () => {
-    sigints++;
-    if (sigints === 1) {
-      process.stderr.write(
-        c.yellow("\nParando: drenando requisições em andamento (Ctrl+C de novo força a saída)…\n"),
-      );
-      stopper.abort();
-    } else {
-      process.stderr.write(c.red("\nSaída forçada; relatório parcial não foi salvo.\n"));
-      process.exit(ExitCode.INTERRUPTED);
-    }
-  };
-  process.on("SIGINT", onSigint);
-  process.on("SIGTERM", () => stopper.abort());
-
-  // Registro para o `npm run stop` conseguir interromper este teste com segurança.
-  fs.mkdirSync(cfg.runDir, { recursive: true });
-  const runFile = path.join(cfg.runDir, `cli-${process.pid}.json`);
-  const stopFile = path.join(cfg.runDir, `cli-${process.pid}.stop`);
-  fs.writeFileSync(
-    runFile,
-    JSON.stringify({
-      pid: process.pid,
-      scenario: scenario.name,
-      startedAt: new Date().toISOString(),
-      entry: process.argv[1],
-    }),
-  );
-  const stopPoll = setInterval(() => {
-    if (fs.existsSync(stopFile)) {
-      process.stderr.write(c.yellow("\nParada solicitada por `npm run stop`.\n"));
-      stopper.abort();
-    }
-  }, 300);
-  const cleanup = () => {
-    clearInterval(stopPoll);
-    for (const f of [runFile, stopFile]) fs.rmSync(f, { force: true });
-  };
-  process.on("exit", cleanup);
-
+  const control = new RunControl(scenario.name);
   const workers = resolveWorkers(scenario, flags.workers);
   if (!flags.quiet) {
     console.log(
@@ -159,33 +65,54 @@ async function runCommand(file: string, flags: RunFlags): Promise<number> {
         `, ${load.connections} conexões, ${workers} worker(s)`,
     );
   }
-  const tty = process.stdout.isTTY && !flags.quiet;
-  let lastLog = 0;
+  const progress = progressPrinter(flags.quiet, scenario.load.stages.length);
   const report = await runScenario(scenario, {
     toolVersion: VERSION,
     connections: load.connections,
-    stopSignal: stopper.signal,
+    stopSignal: control.signal,
     workers,
     maxRps: limits.maxRps,
     systemMetrics: flags.systemMetrics !== false,
-    onProgress: flags.quiet
-      ? undefined
-      : (p) => {
-          const line = progressLine(p, scenario.load.stages.length);
-          if (tty) process.stdout.write(`\r\x1b[2K${line}`);
-          else if (p.elapsedMs - lastLog >= 5000) {
-            lastLog = p.elapsedMs;
-            console.log(line);
-          }
-        },
+    onProgress: progress.onProgress,
   });
-  if (tty) process.stdout.write("\r\x1b[2K");
-  process.off("SIGINT", onSigint);
-  cleanup();
+  progress.clear();
+  control.dispose();
 
   const reportPath = writeJsonReport(report, reportsDir);
   printSummary(report, path.relative(process.cwd(), reportPath) || reportPath);
-  return exitCodeFor(report);
+  let code = exitCodeFor(report);
+
+  if (flags.baseline) {
+    if (!baseline) {
+      console.log(
+        c.yellow(
+          `\n! sem baseline para "${scenario.name}" (crie com --save-baseline ou lt baseline set)`,
+        ),
+      );
+    } else if (report.run.status === "completed" && !report.run.invalid) {
+      const check = checkBaseline(report, baseline, { thresholdPct: flags.regressionThreshold });
+      console.log(
+        c.bold(
+          `\nBaseline (${baseline.kind}, definida em ${baseline.setAt.slice(0, 16).replace("T", " ")})`,
+        ),
+      );
+      printComparison(check.comparison);
+      if (check.regression && code === ExitCode.OK) code = ExitCode.THRESHOLDS_FAILED;
+    }
+  }
+  if (flags.saveBaseline) {
+    if (code === ExitCode.OK) {
+      setBaseline(cfg.dataDir, report, path.relative(cfg.root, reportPath));
+      console.log(c.green(`✓ execução salva como baseline de "${scenario.name}"`));
+    } else {
+      console.log(
+        c.yellow(
+          "! baseline não atualizada: a execução não passou (thresholds, regressão ou inválida)",
+        ),
+      );
+    }
+  }
+  return code;
 }
 
 const program = new Command()
@@ -194,28 +121,26 @@ const program = new Command()
   .version(VERSION)
   .showHelpAfterError();
 
-program
-  .command("run")
-  .description("executa um cenário e gera o relatório")
-  .argument("<cenario>", "arquivo YAML/JSON do cenário")
-  .option("-o, --out <dir>", "diretório de relatórios (dentro do projeto)")
-  .option("--i-own-this-target", "permite alvo fora da allowlist (exige confirmação)")
-  .option("--confirm-target <host>", "confirmação não interativa do host (CI)")
-  .option("--max-rps <n>", "eleva o teto de RPS desta execução", positiveInt)
-  .option("--max-connections <n>", "eleva o teto de conexões desta execução", positiveInt)
-  .option("--max-vus <n>", "eleva o teto de VUs desta execução (modelo fechado)", positiveInt)
-  .option(
-    "-w, --workers <n|auto>",
-    "threads geradoras de carga (padrão: load.workers ou auto)",
-    workersArg,
-  )
-  .option("--no-system-metrics", "não coleta CPU/memória da máquina")
-  .option("-q, --quiet", "sem progresso ao vivo")
-  .action(async (file: string, flags: RunFlags) => {
-    process.exitCode = await runCommand(file, flags);
-  });
+addCommonRunOptions(
+  program
+    .command("run")
+    .description("executa um cenário e gera o relatório")
+    .argument("<cenario>", "arquivo YAML/JSON do cenário")
+    .option("-o, --out <dir>", "diretório de relatórios (dentro do projeto)")
+    .option("--baseline", "compara com a baseline do cenário; regressão → exit 1")
+    .option(
+      "--regression-threshold <pct>",
+      "piora mínima para contar como regressão",
+      percentArg,
+      10,
+    )
+    .option("--save-baseline", "salva esta execução como baseline (se passar)"),
+).action(async (file: string, flags: RunFlags) => {
+  process.exitCode = await runCommand(file, flags);
+});
 
 registerScenarioCommands(program);
+registerBenchCommands(program);
 
 try {
   await program.parseAsync();
