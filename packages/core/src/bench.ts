@@ -7,7 +7,8 @@ import {
   type ComparisonResult,
   type RunMetrics,
 } from "./compare.js";
-import { makeRunId, writeJsonReport, type RunReport } from "./report.js";
+import { makeRunId, type RunReport } from "./report.js";
+import { writeBenchReports, writeRunReports, type ReportFormat } from "./reporting/write.js";
 import { runScenario, type RunOptions } from "./runner.js";
 import type { Scenario } from "./scenario/types.js";
 import { bootstrapCI, mean, median, stdev, type Interval } from "./stats/stats.js";
@@ -77,6 +78,8 @@ export interface BenchOptions {
   runOptions: Omit<RunOptions, "toolVersion" | "runId" | "stopSignal" | "onProgress">;
   stopSignal?: AbortSignal;
   compare?: ComparisonOptions;
+  /** Formatos gravados para cada rodada e para o resumo (padrão: DEFAULT_FORMATS). */
+  formats?: ReportFormat[];
   onRunStart?: (info: { label: string; round: number; index: number; total: number }) => void;
   onRunDone?: (info: { label: string; round: number; report: RunReport }) => void;
   onProgress?: RunOptions["onProgress"];
@@ -153,7 +156,7 @@ export async function runBench(o: BenchOptions): Promise<{ report: BenchReport; 
       stopSignal: o.stopSignal,
       onProgress: o.onProgress,
     });
-    const file = writeJsonReport(report, dir);
+    const file = writeRunReports(report, path.join(dir, runId), o.formats)["report.json"]!;
     executed.push(runId);
     runs[label].push({
       id: runId,
@@ -237,8 +240,7 @@ export async function runBench(o: BenchOptions): Promise<{ report: BenchReport; 
     ...(comparison ? { comparison } : {}),
     warnings,
   };
-  const file = path.join(dir, "bench.json");
-  fs.writeFileSync(file, JSON.stringify(report, null, 2));
+  const file = writeBenchReports(report, dir, o.formats)["bench.json"]!;
   return { report, file };
 }
 

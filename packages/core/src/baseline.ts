@@ -129,6 +129,11 @@ export function checkBaseline(
   const o: ComparisonOptions = { ...opts, minEffectPct: opts.thresholdPct };
   if (!isBenchReport(baseline.report)) {
     const comparison = compareRuns(baseline.report, current, o);
+    comparison.a.label = "baseline";
+    comparison.b.label = "atual";
+    comparison.conclusion = comparison.conclusion
+      .replace("REGRESSÃO em B", "REGRESSÃO na execução atual")
+      .replace("B é melhor", "a execução atual é melhor");
     return { regression: comparison.regression, comparison };
   }
   const g = baseline.report.groups[0]!;
