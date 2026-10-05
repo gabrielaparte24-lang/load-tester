@@ -1,4 +1,5 @@
 import http from "node:http";
+import http2 from "node:http2";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { PreciseScheduler } from "@lt/core";
 
@@ -26,7 +27,25 @@ export interface DemoOptions {
 const MAX_SLEEP_MS = 60_000;
 const MAX_BYTES = 10 * 1024 * 1024;
 
+export type DemoHandler = (req: http.IncomingMessage, res: http.ServerResponse) => void;
+
 export function createDemoServer(opts: DemoOptions = {}): http.Server {
+  const server = http.createServer(createDemoHandler(opts));
+  server.keepAliveTimeout = 30_000;
+  return server;
+}
+
+/**
+ * Mesmas rotas em HTTP/2 sem TLS (h2c, "conhecimento prévio"), para testar HTTP/2 sem certificados.
+ * A API de compatibilidade do http2 aceita o mesmo handler.
+ */
+export function createDemoH2Server(opts: DemoOptions = {}): http2.Http2Server {
+  return http2.createServer(
+    createDemoHandler(opts) as unknown as Parameters<typeof http2.createServer>[0],
+  );
+}
+
+export function createDemoHandler(opts: DemoOptions = {}): DemoHandler {
   const timer = new PreciseScheduler();
   const instanceId = opts.instanceId ?? randomUUID();
   const startedAt = Date.now();
@@ -42,7 +61,7 @@ export function createDemoServer(opts: DemoOptions = {}): http.Server {
     res.end(payload);
   };
 
-  const server = http.createServer((req, res) => {
+  return (req, res) => {
     served++;
     const url = new URL(req.url ?? "/", "http://demo");
     const q = url.searchParams;
@@ -170,9 +189,7 @@ export function createDemoServer(opts: DemoOptions = {}): http.Server {
           ],
         });
     }
-  });
-  server.keepAliveTimeout = 30_000;
-  return server;
+  };
 }
 
 function authorized(req: http.IncomingMessage, token?: string): boolean {

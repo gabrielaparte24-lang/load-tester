@@ -13,7 +13,10 @@ import {
   initScenarioYaml,
   loadScenarioFile,
   previewIterations,
+  PROFILES,
+  profileYaml,
   resolveInside,
+  type Profile,
   scenarioSchema,
   scenarioToYaml,
   schemaRef,
@@ -28,6 +31,14 @@ const positiveInt = (v: string) => {
   if (!Number.isInteger(n) || n <= 0) throw new ConfigError(`"${v}" deve ser um inteiro positivo`);
   return n;
 };
+
+interface InitFlags {
+  target: string;
+  profile?: string;
+  path: string;
+  name?: string;
+  force?: boolean;
+}
 
 /** Grava dentro do projeto; recusa sobrescrever sem --force. */
 function writeInsideProject(file: string, content: string, force?: boolean): string {
@@ -135,22 +146,32 @@ export function registerScenarioCommands(program: Command): void {
 
   program
     .command("init")
-    .description("gera um cenário de exemplo comentado")
+    .description("gera um cenário comentado (exemplo completo ou perfil de carga pronto)")
     .argument("[arquivo]", "arquivo a criar", "scenario.yaml")
     .option("--target <url>", "URL base do alvo", "http://127.0.0.1:4100")
+    .option("--profile <perfil>", `perfil de carga: ${PROFILES.join(", ")}`)
+    .option("--path <caminho>", "caminho requisitado pelo perfil", "/fast")
     .option("--name <nome>", "nome do cenário")
     .option("--force", "sobrescreve se existir")
-    .action((file: string, flags: { target: string; name?: string; force?: boolean }) => {
+    .action((file: string, flags: InitFlags) => {
       if (!/^https?:\/\//.test(flags.target))
         throw new ConfigError("--target deve começar com http:// ou https://");
-      const name = flags.name ?? path.basename(file).replace(/\.(ya?ml|json)$/i, "");
+      if (flags.profile && !PROFILES.includes(flags.profile as Profile)) {
+        throw new ConfigError(
+          `perfil "${flags.profile}" desconhecido (use: ${PROFILES.join(", ")})`,
+        );
+      }
+      if (!flags.path.startsWith("/")) throw new ConfigError('--path deve começar com "/"');
+      const common = {
+        name: flags.name ?? path.basename(file).replace(/\.(ya?ml|json)$/i, ""),
+        baseUrl: flags.target.replace(/\/+$/, ""),
+        schemaPath: schemaRef(file, getConfig().root),
+      };
       const written = writeInsideProject(
         file,
-        initScenarioYaml({
-          name,
-          baseUrl: flags.target.replace(/\/+$/, ""),
-          schemaPath: schemaRef(file, getConfig().root),
-        }),
+        flags.profile
+          ? profileYaml(flags.profile as Profile, { ...common, path: flags.path })
+          : initScenarioYaml(common),
         flags.force,
       );
       const rel = path.relative(process.cwd(), written);

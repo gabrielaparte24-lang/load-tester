@@ -13,6 +13,7 @@ import {
   formatDuration,
   getConfig,
   loadScenarioFile,
+  resolveWorkers,
   resolveInside,
   runScenario,
   writeJsonReport,
@@ -35,12 +36,17 @@ const positiveInt = (v: string) => {
   return n;
 };
 
+const workersArg = (v: string): number | "auto" => (v === "auto" ? "auto" : positiveInt(v));
+
 interface RunFlags {
   out?: string;
   iOwnThisTarget?: boolean;
   confirmTarget?: string;
   maxRps?: number;
   maxConnections?: number;
+  maxVus?: number;
+  workers?: number | "auto";
+  systemMetrics?: boolean;
   quiet?: boolean;
 }
 
@@ -58,6 +64,7 @@ async function runCommand(file: string, flags: RunFlags): Promise<number> {
     maxRps: flags.maxRps ?? cfg.maxRps,
     maxConnections: flags.maxConnections ?? cfg.maxConnections,
     maxDurationMs: cfg.maxDurationMs,
+    maxVus: flags.maxVus ?? cfg.maxVus,
   };
   const load = enforceLimits(scenario, limits);
 
@@ -76,7 +83,9 @@ async function runCommand(file: string, flags: RunFlags): Promise<number> {
       `  Host:        ${target.host} (${target.addresses.join(", ") || "sem IP resolvido"})`,
     );
     console.log(
-      `  Taxa máxima: ${load.peakRps} rps   Duração: ${formatDuration(load.durationMs)}   ~${load.expectedRequests} requisições`,
+      load.model === "open"
+        ? `  Taxa máxima: ${load.peakRps} rps   Duração: ${formatDuration(load.durationMs)}   ~${load.expectedRequests} requisições`
+        : `  VUs: até ${load.peakVus} (teto de ${load.peakRps} rps)   Duração: ${formatDuration(load.durationMs)}`,
     );
     if (flags.confirmTarget !== undefined) {
       if (flags.confirmTarget.toLowerCase() !== target.host) {
@@ -139,10 +148,15 @@ async function runCommand(file: string, flags: RunFlags): Promise<number> {
   };
   process.on("exit", cleanup);
 
+  const workers = resolveWorkers(scenario, flags.workers);
   if (!flags.quiet) {
     console.log(
       `${c.bold("lt")} ${VERSION}  ${c.cyan(scenario.name)} → ${scenario.target.baseUrl}  ` +
-        `${formatDuration(load.durationMs)}, pico ${load.peakRps} rps, ${load.connections} conexões`,
+        `${formatDuration(load.durationMs)}, ` +
+        (load.model === "open"
+          ? `pico ${load.peakRps} rps`
+          : `até ${load.peakVus} VUs (teto ${load.peakRps} rps)`) +
+        `, ${load.connections} conexões, ${workers} worker(s)`,
     );
   }
   const tty = process.stdout.isTTY && !flags.quiet;
@@ -151,6 +165,9 @@ async function runCommand(file: string, flags: RunFlags): Promise<number> {
     toolVersion: VERSION,
     connections: load.connections,
     stopSignal: stopper.signal,
+    workers,
+    maxRps: limits.maxRps,
+    systemMetrics: flags.systemMetrics !== false,
     onProgress: flags.quiet
       ? undefined
       : (p) => {
@@ -186,6 +203,13 @@ program
   .option("--confirm-target <host>", "confirmação não interativa do host (CI)")
   .option("--max-rps <n>", "eleva o teto de RPS desta execução", positiveInt)
   .option("--max-connections <n>", "eleva o teto de conexões desta execução", positiveInt)
+  .option("--max-vus <n>", "eleva o teto de VUs desta execução (modelo fechado)", positiveInt)
+  .option(
+    "-w, --workers <n|auto>",
+    "threads geradoras de carga (padrão: load.workers ou auto)",
+    workersArg,
+  )
+  .option("--no-system-metrics", "não coleta CPU/memória da máquina")
   .option("-q, --quiet", "sem progresso ao vivo")
   .action(async (file: string, flags: RunFlags) => {
     process.exitCode = await runCommand(file, flags);

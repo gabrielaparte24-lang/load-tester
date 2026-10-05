@@ -19,9 +19,13 @@ export function progressLine(p: ProgressSnapshot, stages: number): string {
   const phase = p.warmup ? c.yellow("aquecimento") : `etapa ${p.stage + 1}/${stages}`;
   return (
     `[${formatDuration(p.elapsedMs)}/${formatDuration(p.totalMs)}] ${phase} ` +
-    `alvo ${fx(p.targetRps, 0)} rps | enviado ${p.sentRps} | concluído ${p.rps} | ` +
+    (p.model === "open"
+      ? `alvo ${fx(p.targetRps, 0)} rps | enviado ${p.sentRps} | `
+      : `VUs ${p.concurrency}/${p.targetVus} | iniciadas ${p.sentRps} | `) +
+    `concluído ${p.rps} | ` +
     `erros ${p.errors ? c.red(p.errors) : 0} | p50 ${fx(p.latencyMs.p50)} p95 ${fx(p.latencyMs.p95)} p99 ${fx(p.latencyMs.p99)} ms | ` +
-    `em andamento ${p.inFlight}`
+    (p.model === "open" ? `em andamento ${p.concurrency}` : "") +
+    (p.cpu !== undefined ? ` | CPU ${fx(p.cpu, 0)}%` : "")
   );
 }
 
@@ -35,17 +39,23 @@ export function printSummary(r: RunReport, reportPath: string): void {
   const out: string[] = [];
   out.push("");
   out.push(
-    `${c.bold(r.run.scenario)}  ${statusText} em ${formatDuration(r.run.durationMs)}  ${c.dim(`(modelo aberto, seed ${r.run.seed})`)}`,
+    `${c.bold(r.run.scenario)}  ${statusText} em ${formatDuration(r.run.durationMs)}  ${c.dim(`(modelo ${r.run.model === "open" ? "aberto" : "fechado"}, ${r.generator.workers} worker(s), seed ${r.run.seed})`)}`,
   );
   out.push(
     `  Requisições  ${s.requests.total}  ok ${s.requests.ok}  falhas ${s.requests.failed ? c.red(s.requests.failed) : 0} ` +
       `(${fx(s.errorRate * 100, 2)}%)`,
   );
-  const dev = s.rps.requested ? ((s.rps.sent - s.rps.requested) / s.rps.requested) * 100 : 0;
-  out.push(
-    `  Taxa         pedida ${fx(s.rps.requested, 2)}/s  enviada ${fx(s.rps.sent, 2)}/s (${dev >= 0 ? "+" : ""}${fx(dev, 2)}%)  ` +
-      `concluída ${fx(s.rps.achieved, 2)} req/s`,
-  );
+  if (s.rps.requested !== null) {
+    const dev = s.rps.requested ? ((s.rps.sent - s.rps.requested) / s.rps.requested) * 100 : 0;
+    out.push(
+      `  Taxa         pedida ${fx(s.rps.requested, 2)}/s  enviada ${fx(s.rps.sent, 2)}/s (${dev >= 0 ? "+" : ""}${fx(dev, 2)}%)  ` +
+        `concluída ${fx(s.rps.achieved, 2)} req/s  pico simultâneo ${s.maxConcurrency}`,
+    );
+  } else {
+    out.push(
+      `  Vazão        ${fx(s.rps.achieved, 2)} req/s  iterações ${fx(s.rps.sent, 2)}/s  VUs (pico) ${s.maxConcurrency}`,
+    );
+  }
   out.push(
     `  Latência ms  p50 ${fx(l.p50, 2)}  p90 ${fx(l.p90, 2)}  p95 ${fx(l.p95, 2)}  p99 ${fx(l.p99, 2)}  p99.9 ${fx(l.p999, 2)}  ` +
       `máx ${fx(l.max, 2)}  média ${fx(l.mean, 2)} ± ${fx(l.stdev, 2)}`,
@@ -53,6 +63,20 @@ export function printSummary(r: RunReport, reportPath: string): void {
   out.push(
     `  Serviço ms   p50 ${fx(s.serviceTimeMs.p50, 2)}  p99 ${fx(s.serviceTimeMs.p99, 2)}  ${c.dim("(do envio real até a resposta)")}`,
   );
+  out.push(
+    `  Fases ms     TTFB p50 ${fx(s.ttfbMs.p50, 2)} p99 ${fx(s.ttfbMs.p99, 2)}  download p50 ${fx(s.downloadMs.p50, 2)} p99 ${fx(s.downloadMs.p99, 2)}`,
+  );
+  const cn = s.connections;
+  if (cn.opened) {
+    const protos = Object.entries(cn.byProtocol)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(", ");
+    out.push(
+      `  Conexões     ${cn.opened} nova(s) (${protos})  DNS p50 ${fx(cn.dnsMs.p50, 2)}  TCP p50 ${fx(cn.connectMs.p50, 2)}` +
+        (cn.tlsMs.max ? `  TLS p50 ${fx(cn.tlsMs.p50, 2)}` : "") +
+        ` ms`,
+    );
+  }
   const errs = Object.entries(s.errorsByType);
   if (errs.length) out.push(`  Erros        ${errs.map(([k, v]) => `${k}: ${v}`).join("  ")}`);
   const codes = Object.entries(s.statusCodes);
@@ -89,12 +113,31 @@ export function printSummary(r: RunReport, reportPath: string): void {
       out.push(c.dim(`    ${String(f.count).padStart(6)}×  ${f.step}: ${f.message}`));
     }
   }
-  const lag = r.generator.scheduleLagMs;
+  const g = r.generator;
   out.push(
     c.dim(
-      `  Gerador      atraso de agendamento p50 ${fx(lag.p50, 3)} p99 ${fx(lag.p99, 3)} máx ${fx(lag.max, 2)} ms  CPU ${r.generator.cpuPercent}%`,
+      `  Gerador      ${g.workers} worker(s)` +
+        (r.run.model === "open"
+          ? `  agendamento p99 ${fx(g.scheduleLagMs.p99, 3)} máx ${fx(g.scheduleLagMs.max, 2)} ms`
+          : "") +
+        `  event loop p99 ${fx(g.loopLagMs.p99, 2)} ms  CPU ${g.cpuPercent}% de 1 núcleo`,
     ),
   );
+  if (r.machine) {
+    out.push(
+      c.dim(
+        `  Máquina      CPU média ${r.machine.cpuAvg}% (máx ${r.machine.cpuMax}%)  memória máx ${r.machine.memMaxPct}%  processo ${r.machine.rssMaxMb} MB`,
+      ),
+    );
+  }
+  if (r.run.breakingPoint) {
+    const bp = r.run.breakingPoint;
+    out.push(
+      c.yellow(
+        `  Ruptura      ${bp.condition} no segundo ${bp.t} — carga pedida ${bp.targetRps !== undefined ? `${bp.targetRps} rps` : `${bp.vus} VUs`}, vazão obtida ${bp.achievedRps} req/s`,
+      ),
+    );
+  }
   if (r.thresholds.length) {
     out.push("  Thresholds");
     for (const t of r.thresholds) {

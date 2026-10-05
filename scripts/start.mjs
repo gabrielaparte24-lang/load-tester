@@ -196,7 +196,7 @@ if (foreground && toStart.includes(svc.server)) {
   console.log(`\nDashboard/API: ${c.cyan(svc.server.url)}   health: ${svc.server.url}/api/health`);
   if (flags["with-demo"])
     console.log(
-      `Alvo de demonstração: ${c.cyan(svc.demo.url)}  (rotas: /fast /slow?ms= /flaky?rate= /echo)`,
+      `Alvo de demonstração: ${c.cyan(svc.demo.url)}  (rotas: /fast /slow?ms= /flaky?rate= /echo; HTTP/2 h2c na porta ${svc.demo.port + 1})`,
     );
   console.log(c.dim("Parar: npm run stop   Status: npm run status\n"));
   if (flags.open) openBrowser(svc.server.url);
