@@ -18,6 +18,7 @@ import {
   writeJsonReport,
   type RunReport,
 } from "@lt/core";
+import { registerScenarioCommands } from "./scenario-commands.js";
 import { ask, c, printSummary, progressLine } from "./ui.js";
 
 // Saída fechada (ex.: `lt run x.yaml | head`) não pode derrubar um teste em andamento nem o relatório.
@@ -190,18 +191,7 @@ program
     process.exitCode = await runCommand(file, flags);
   });
 
-program
-  .command("validate")
-  .description("valida um cenário sem executar")
-  .argument("<cenario...>", "arquivo(s) YAML/JSON")
-  .action((files: string[]) => {
-    for (const f of files) {
-      const sc = loadScenarioFile(f);
-      console.log(
-        `${c.green("✓")} ${f}: "${sc.name}" válido (${sc.flow.length} etapa(s) de fluxo, ${sc.load.stages.length} etapa(s) de carga)`,
-      );
-    }
-  });
+registerScenarioCommands(program);
 
 try {
   await program.parseAsync();

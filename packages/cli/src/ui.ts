@@ -60,10 +60,33 @@ export function printSummary(r: RunReport, reportPath: string): void {
   if (r.steps.length > 1) {
     out.push("  Etapas");
     for (const st of r.steps) {
+      const label = st.flow ? `${st.flow} › ${st.name}` : st.name;
       out.push(
-        `    ${st.name.padEnd(28)} ${String(st.requests).padStart(7)} req  p50 ${fx(st.latencyMs.p50, 2)}  p95 ${fx(st.latencyMs.p95, 2)}  ` +
+        `    ${label.padEnd(32)} ${String(st.requests).padStart(7)} req  p50 ${fx(st.latencyMs.p50, 2)}  p95 ${fx(st.latencyMs.p95, 2)}  ` +
           `p99 ${fx(st.latencyMs.p99, 2)} ms  erros ${fx(st.errorRate * 100, 2)}%`,
       );
+    }
+  }
+  if (s.checks.passed + s.checks.failed) {
+    out.push(
+      `  Checagens    ${s.checks.passed} ok  ${s.checks.failed ? c.red(`${s.checks.failed} reprovadas`) : "0 reprovadas"}`,
+    );
+    for (const st of r.steps) {
+      for (const ch of st.checks.filter((x) => x.failed)) {
+        const total = ch.passed + ch.failed;
+        out.push(
+          c.red(
+            `    ✗ ${st.flow ? `${st.flow} › ` : ""}${st.name}: ${ch.name}  ${ch.failed}/${total} (${fx((ch.failed / total) * 100, 1)}%)`,
+          ),
+        );
+      }
+    }
+  }
+  const failures = r.steps.flatMap((st) => st.failures.map((f) => ({ ...f, step: st.name })));
+  if (failures.length) {
+    out.push("  Falhas mais comuns");
+    for (const f of failures.sort((a, b) => b.count - a.count).slice(0, 5)) {
+      out.push(c.dim(`    ${String(f.count).padStart(6)}×  ${f.step}: ${f.message}`));
     }
   }
   const lag = r.generator.scheduleLagMs;
