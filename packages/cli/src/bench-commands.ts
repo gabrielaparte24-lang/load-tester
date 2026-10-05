@@ -1,7 +1,12 @@
+import fs from "node:fs";
 import path from "node:path";
 import type { Command } from "commander";
 import {
   ConfigError,
+  DEFAULT_FORMATS,
+  REPORT_FORMATS,
+  parseFormats,
+  type ReportFormat,
   ExitCode,
   MIN_BENCH_RUNS,
   VERSION,
@@ -49,6 +54,7 @@ interface BenchFlags extends CommonRunFlags, StatFlags {
   ab?: string;
   abTarget?: string;
   out?: string;
+  format: ReportFormat[];
 }
 
 const statOptions = (cmd: Command) =>
@@ -92,7 +98,13 @@ export function registerBenchCommands(program: Command): void {
         )
         .option("--ab <cenarioB>", "A/B: segundo cenário (grupo B)")
         .option("--ab-target <url>", "A/B: mesmo cenário contra outra URL base (grupo B)")
-        .option("-o, --out <dir>", "diretório de relatórios (dentro do projeto)"),
+        .option("-o, --out <dir>", "diretório de relatórios (dentro do projeto)")
+        .option(
+          "-f, --format <lista>",
+          `formatos: ${REPORT_FORMATS.join(",")} ou all`,
+          parseFormats,
+          DEFAULT_FORMATS,
+        ),
     ),
   ).action(async (file: string, flags: BenchFlags) => {
     const cfg = getConfig();
@@ -140,6 +152,7 @@ export function registerBenchCommands(program: Command): void {
       },
       stopSignal: control.signal,
       compare: compareOpts(flags),
+      formats: flags.format,
       onRunStart: ({ label, round, index }) => {
         prefix = `[${b ? `${label} ` : ""}${round}/${flags.runs} · ${index}/${total}] `;
       },
@@ -161,7 +174,9 @@ export function registerBenchCommands(program: Command): void {
     });
     progress.clear();
     control.dispose();
-    printBench(report, path.relative(process.cwd(), out) || out);
+    const html = out.replace(/bench.json$/, "bench.html");
+    const shown = fs.existsSync(html) ? html : out;
+    printBench(report, path.relative(process.cwd(), shown) || shown);
     let code: number = ExitCode.OK;
     if (report.bench.status === "interrupted") code = ExitCode.INTERRUPTED;
     else if (report.groups.some((g) => g.summary.p50.n < MIN_BENCH_RUNS))
