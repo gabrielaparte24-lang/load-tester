@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
 # Validação da ferramenta: latência conhecida de 100 ms no alvo.
 # Esperado: p50 ≈ p99 ≈ 100 ms (+ ~1 ms de rede local) e taxa enviada ±2% da pedida.
 name: validate-slow-100ms

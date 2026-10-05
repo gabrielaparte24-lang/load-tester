@@ -1,0 +1,19 @@
+name: falhas
+seed: 7
+target: { baseUrl: "http://127.0.0.1:4100" }
+load: { stages: [{ duration: 3s, rps: 20 }] }
+data: { file: usuarios.csv }
+flow:
+  - name: login
+    request:
+      {
+        method: POST,
+        path: /echo,
+        json: { email: "${email}", senha: "${senha}", id: "${num(id)}" },
+      }
+    expect:
+      status: 200
+      jsonPath: { "$.body.id": "<= 2", "$.body.email": "~@ex.test$" }
+    extract: { quem: "$.body.email", naoExiste: "$.body.token" }
+  - name: depois
+    request: { path: "/echo?u=${quem}" }

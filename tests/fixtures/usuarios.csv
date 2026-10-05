@@ -1,0 +1,4 @@
+email,senha,id
+ana@ex.test,s1,1
+"bruno@ex.test","s,2",2
+carla@ex.test,"s""3",3

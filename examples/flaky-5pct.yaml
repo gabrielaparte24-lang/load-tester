@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
 # Validação da ferramenta: 5% de erros 500 no alvo.
 # Esperado: errorRate ≈ 5% (com 6000 requisições, 95% das execuções ficam entre ~4,45% e ~5,55%).
 name: validate-flaky-5pct

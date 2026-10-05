@@ -8,8 +8,9 @@ CLI + (em breve) dashboard em tempo real + relatórios reproduzíveis, com métr
 > `localhost`/`127.0.0.1`/`::1` e nas faixas de `ALLOWED_TARGETS`; qualquer outro host exige
 > `--i-own-this-target` **e** confirmação explícita do hostname.
 
-**Estado:** Fase 0 (experimento mínimo ponta a ponta) concluída — scripts de operação, demo-target,
-`lt run` com modelo aberto e relatório JSON. Veja o [roadmap](#roadmap).
+**Estado:** Fases 0 e 1 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
+relatório JSON e cenários completos (JSON Schema, templates, CSV, encadeamento, checagens, pesos,
+`lt init`, importação de cURL/OpenAPI). Veja o [roadmap](#roadmap).
 
 ## Requisitos
 
@@ -74,7 +75,7 @@ relatórios e logs; headers como `Authorization`, `Cookie` e `X-Api-Key` são se
 ```bash
 npm start -- --with-demo
 npm run lt -- run examples/smoke.yaml        # ou: npx lt run examples/smoke.yaml
-npx lt validate examples/*.yaml              # valida sem executar
+npx lt validate examples/*.yaml              # valida sem executar (--preview N mostra as requisições)
 ```
 
 Durante a execução há uma linha de progresso por segundo; **Ctrl+C** para de agendar e drena as
@@ -82,38 +83,6 @@ requisições em andamento (até 5 s) e salva o relatório parcial; um segundo C
 
 Opções de `lt run`: `--out <dir>`, `--quiet`, `--max-rps <n>`, `--max-connections <n>`,
 `--i-own-this-target`, `--confirm-target <host>` (confirmação não interativa para CI).
-
-### Cenário (subconjunto da Fase 0)
-
-```yaml
-name: checkout-api
-target:
-  baseUrl: http://127.0.0.1:4100
-  headers: { Authorization: "Bearer ${env.API_TOKEN}" }
-  timeoutMs: 5000
-load:
-  model: open # taxa de chegada fixa
-  warmup: 5s # descartado das estatísticas
-  stages:
-    - { duration: 5s, rps: 50 }
-    - { duration: 2m, rps: 50 -> 300 } # rampa linear
-    - { duration: 5m, rps: 300 }
-thresholds: ["p95 < 300ms", "p99 < 800ms", "errorRate < 1%"]
-flow:
-  - name: listar produtos
-    request: { method: GET, path: /products, query: { page: 1 } }
-    expect: { status: 200 }
-  - name: criar
-    request: { method: POST, path: /echo, json: { id: 1 } } # também: body (texto) ou form
-    expect: { status: [200, 201], maxDuration: 500ms }
-    think: 500ms
-```
-
-Erros de validação apontam arquivo, **linha, coluna** e campo. Templates (`randInt`, `uuid`, CSV,
-extração/encadeamento), modelo fechado e pesos entre fluxos chegam na Fase 1/2.
-
-Thresholds suportados: `p50`…`p99.9` (qualquer percentil), `min`, `max`, `mean`/`avg`, `errorRate`
-(`%` ou fração), `rps`; operadores `<`, `<=`, `>`, `>=`, `==`; unidades `ms`, `s`, `us`.
 
 ### Exit codes
 
@@ -124,6 +93,163 @@ Thresholds suportados: `p50`…`p99.9` (qualquer percentil), `min`, `max`, `mean
 | `2`    | erro de configuração/cenário/segurança                              |
 | `3`    | execução inválida (o gerador não sustentou a taxa)                  |
 | `130`  | interrompido (Ctrl+C ou `npm run stop`) — relatório parcial é salvo |
+
+## Cenários
+
+Comece com um exemplo comentado, valide e veja as requisições montadas antes de gerar carga:
+
+```bash
+npx lt init cenarios/meu.yaml --target http://127.0.0.1:4100
+npx lt validate cenarios/meu.yaml --preview 3   # monta (sem enviar) as 3 primeiras iterações
+npx lt run cenarios/meu.yaml
+```
+
+Os cenários são YAML (ou JSON) validados por um **JSON Schema** ([schema/scenario.schema.json](schema/scenario.schema.json))
+mais regras semânticas. Os erros apontam arquivo, **linha, coluna** e campo — todos de uma vez:
+
+```text
+✗ meu.yaml: 3 problema(s)
+  - linha 6, coluna 19: load.stages[0].duration: duração inválida: use ms, s, m ou h (ex.: "500ms", "30s", "1m30s")
+  - linha 13, coluna 40: flows[0].steps[0].request.path: variável "produto" não definida (disponíveis: page)
+  - linha 18, coluna 18: flows[0].steps[1].extrass: campo desconhecido "extrass" (permitidos: name, request, expect, extract, think)
+```
+
+Para autocompletar no VS Code (extensão YAML da Red Hat), a primeira linha do arquivo aponta o schema —
+`lt init` e `lt import` já fazem isso: `# yaml-language-server: $schema=../schema/scenario.schema.json`.
+
+### Estrutura completa
+
+```yaml
+name: checkout-api
+seed: 42 # dados aleatórios reprodutíveis (omitido = semente aleatória, registrada no relatório)
+target:
+  baseUrl: http://127.0.0.1:4100 # pode ter caminho: https://api.interna/v1
+  headers: { Authorization: "Bearer ${env.API_TOKEN}" } # vale para todas as etapas
+  timeoutMs: 5000 # ou timeout: 5s
+load:
+  model: open
+  warmup: 5s
+  stages:
+    - { duration: 30s, rps: 50 }
+    - { duration: 2m, rps: 50 -> 300 }
+thresholds: ["p95 < 300ms", "errorRate < 1%"]
+variables: # avaliadas no início de cada iteração, em ordem
+  page: "${randInt(1, 20)}"
+  cliente: "${pick('ana', 'bruno', 'carla')}"
+data: # CSV com cabeçalho; colunas viram variáveis
+  file: ./dados/clientes.csv # relativo ao arquivo do cenário
+  order: sequential # rodízio (padrão) ou random
+  # name: cli        # opcional: acesso como ${cli.email}
+flows: # ou `flow:` (lista de etapas) quando há um único fluxo
+  - name: navegar
+    weight: 3 # 3 de cada 4 iterações
+    steps:
+      - name: listar produtos
+        request: { method: GET, path: /products, query: { page: "${page}" } }
+        expect: { status: 200, jsonPath: { "$.items.length": ">0" } }
+        extract: { productId: "$.items[0].id" }
+        think: 500ms..2s # pausa aleatória (ou fixa: 500ms)
+      - name: detalhe
+        request: { method: GET, path: "/products/${productId}" }
+        expect: { status: 200, maxDuration: 300ms }
+  - name: comprar
+    weight: 1
+    steps:
+      - request:
+          method: POST
+          path: /echo
+          json: { id: "${randInt(1, 1000)}", email: "${email}", quando: "${isoNow()}" }
+```
+
+### Templates `${...}`
+
+Funcionam em `path`, `query`, `headers`, `json`, `body`, `form`, campos de `multipart` e `variables`.
+
+| Expressão                                                    | Resultado                                                          |
+| ------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `${nome}` `${cli.email}` `${itens[0].id}`                    | variável, propriedade ou índice (de `variables`, CSV ou `extract`) |
+| `${env.API_TOKEN}`                                           | variável de ambiente/`.env` — resolvida ao carregar, **mascarada** |
+| `${randInt(1, 20)}` `${randFloat(1, 9, 2)}`                  | número aleatório (inclusivo) / decimal com casas                   |
+| `${uuid()}` `${randString(8)}`                               | UUID v4 / texto alfanumérico (ou `randString(4, 'abc')`)           |
+| `${pick('a', 'b', 'c')}`                                     | escolhe um item (ou `pick(lista)`)                                 |
+| `${iteration()}` `${__iteration}`                            | índice global da iteração (0, 1, 2…)                               |
+| `${now()}` `${isoNow()}`                                     | epoch em ms / data ISO 8601                                        |
+| `${num(x)}` `${str(x)}`                                      | conversões                                                         |
+| `${base64(x)}` `${urlencode(x)}` `${lower(x)}` `${upper(x)}` | utilidades — ex.: `Basic ${base64(env.CRED)}`                      |
+| `$${texto}`                                                  | escape: produz literalmente `${texto}`                             |
+
+- No `json`, uma string que é **só** uma expressão preserva o tipo: `id: "${randInt(1, 9)}"` envia número;
+  `id: "n-${randInt(1, 9)}"` envia texto.
+- **Reprodutibilidade:** cada iteração k tem um gerador aleatório próprio derivado de `(seed, k)` (sfc32).
+  Com a mesma `seed`, as mesmas iterações geram os mesmos dados — independentemente da concorrência, da
+  ordem das respostas e da máquina. A semente usada fica em `run.seed` no relatório.
+- Variáveis inexistentes são apontadas **na validação** (inclusive "só é extraída na etapa 3, depois desta").
+
+### Corpo da requisição
+
+Use um entre `json`, `body` (texto), `form` (urlencoded), `file` (bytes de um arquivo, `contentType`
+deduzido pela extensão) e `multipart` (`campo: "texto"` ou `foto: { file: ./a.png, contentType: image/png }`).
+`contentType` sobrescreve o padrão; `headers` da etapa sobrescrevem os de `target` (sem diferenciar maiúsculas).
+
+### Extração e encadeamento (`extract`)
+
+```yaml
+extract:
+  token: "$.data.token" # JSONPath (atalho)
+  local: { header: location } # header da resposta
+  pedido: { regex: "pedido=(\\d+)", group: 1 } # regex no corpo (grupo 1 por padrão se houver)
+  plano: { jsonPath: "$.plano", default: basico } # valor padrão se não encontrar
+```
+
+O valor fica disponível nas etapas seguintes da mesma iteração. Se a extração falhar (sem `default`), a
+etapa conta como `check_failed` e a iteração para ali — etapas dependentes não são enviadas.
+
+JSONPath suportado: `$`, `.nome`, `['nome']`, `[0]`, `[-1]`, `[*]`/`.*` (vira lista) e `.length`.
+
+### Checagens (`expect`)
+
+```yaml
+expect:
+  status: 200 # ou [200, 201]; sem status, qualquer < 400 é sucesso
+  maxDuration: 300ms # latência (desde o instante previsto) acima disso falha
+  jsonPath: { "$.items.length": ">0", "$.ok": true, "$.id": exists, "$.nome": "~^Ana" }
+  headers: { content-type: "~json" }
+  bodyContains: "pedido criado" # ou lista
+  bodyMatches: "id=\\d+"
+```
+
+Matchers: valor literal (igualdade), `">0"` `">= 5"` `"<10"` `"<= 2"`, `"== ok"` `"!= erro"`,
+`"~regex"`, `exists`, `!exists`. Dica: regex em YAML fica mais simples entre aspas simples
+(`'~@exemplo\.test$'`).
+
+Cada checagem é contada separadamente; o resumo e o relatório mostram as reprovadas e as **mensagens de
+falha mais comuns** (ex.: `$.body.idade < 35 (recebido: 41)`). Status fora do esperado conta como
+`http_4xx`/`http_5xx`; as demais falhas como `check_failed`; templates que não puderam ser montados como
+`template_error`.
+
+### Importar de cURL e OpenAPI
+
+```bash
+npx lt import curl "curl -X POST https://api.exemplo.test/v1/x -H 'Authorization: Bearer ...' --json '{\"q\":1}'" -o cenarios/x.yaml
+npx lt import curl --file comando-curl.txt -o cenarios/x.yaml   # evita o segredo no histórico do shell
+npx lt import openapi openapi.yaml -o cenarios/api.yaml [--base-url URL] [--all-methods]
+```
+
+- **Segredos nunca são copiados**: `Authorization`, `Cookie`, chaves de API e `-u usuario:senha` viram
+  `${env.LT_*}` e o comando lista as variáveis a definir no `.env`.
+- cURL: entende `-X`, `-H`, `-d`/`--data*`, `--data-urlencode`, `--json`, `-F` (multipart), `-G`, `-u`,
+  `-b`, `-A`, `-e`, `--url`; aceita continuações de linha do bash (`\`), cmd (`^`) e PowerShell (`` ` ``).
+- OpenAPI 3.x e Swagger 2.0: resolve `$ref` locais e variáveis de servidor, gera valores de exemplo a
+  partir dos schemas (`example`, `default`, `enum`, formatos `uuid`/`email`/`date-time`, faixas numéricas)
+  e cria **um fluxo de peso 1 por operação**. Por segurança só inclui `GET`/`HEAD`; `--all-methods` inclui
+  os que alteram dados.
+
+`lt schema [-o arquivo]` imprime o JSON Schema.
+
+### Thresholds
+
+`p50`…`p99.9` (qualquer percentil), `min`, `max`, `mean`/`avg`, `errorRate` (`%` ou fração), `rps`;
+operadores `<`, `<=`, `>`, `>=`, `==`; unidades `ms`, `s`, `us`.
 
 ## Como as métricas são medidas
 
@@ -165,12 +291,15 @@ conta em taxas altas.
 Gravado em `reports/<AAAAMMDD-HHMMSS>-<cenário>/report.json`. Campos principais:
 
 - `run`: id, status (`completed` | `interrupted` | `failed`), início/fim, seed, `invalid` + motivos, avisos.
-- `config`: alvo (headers mascarados), etapas, aquecimento, conexões, thresholds.
+- `config`: alvo (headers mascarados), etapas de carga, aquecimento, conexões, thresholds, `flows`
+  (nome, peso, etapas), `data` (arquivo, ordem, linhas, colunas) e nomes de `variables`.
 - `summary`: janela medida, requisições ok/falhas, iterações (agendadas/iniciadas/concluídas/descartadas),
   `errorRate` (0..1), `rps` (pedida/enviada/concluída), `latencyMs` e `serviceTimeMs`
   (`count, min, mean, stdev, p50, p75, p90, p95, p99, p999, max`), status HTTP, erros por tipo
-  (`timeout`, `connection_refused`, `connection_reset`, `dns`, `http_4xx`, `http_5xx`, `check_failed`, …), bytes.
-- `steps[]`: as mesmas métricas por etapa do fluxo.
+  (`timeout`, `connection_refused`, `connection_reset`, `dns`, `http_4xx`, `http_5xx`, `check_failed`,
+  `template_error`, …), bytes, `checks` (aprovadas/reprovadas).
+- `steps[]`: as mesmas métricas por etapa (`flow` + `name`), `checks[]` (nome, aprovadas, reprovadas) e
+  `failures[]` (mensagens de falha mais frequentes, até 20 distintas, já mascaradas).
 - `timeline[]`: por segundo — taxa pedida/enviada/concluída, erros, p50/p95/p99/máx.
 - `thresholds[]`: expressão, valor medido, aprovado.
 - `generator`: atraso de agendamento, CPU do processo.
@@ -209,7 +338,7 @@ Estrutura: `packages/core` (motor, métricas, cenários), `packages/cli` (`lt`),
 ## Roadmap
 
 - [x] **Fase 0** — scripts, demo-target, `lt run` (modelo aberto), relatório JSON, validação.
-- [ ] **Fase 1** — JSON Schema, templates (`randInt`, `uuid`, `pick`), CSV, extração/encadeamento,
+- [x] **Fase 1** — JSON Schema, templates (`randInt`, `uuid`, `pick`), CSV, extração/encadeamento,
       pesos, `lt init`, import cURL/OpenAPI.
 - [ ] **Fase 2** — `worker_threads`, modelo fechado, perfis (smoke/load/stress/spike/soak), tempos de
       DNS/conexão/TLS/TTFB, HTTP/2, detecção ampliada de saturação, CPU/memória.

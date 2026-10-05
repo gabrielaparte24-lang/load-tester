@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ScenarioError,
+  buildRequest,
   checkTarget,
+  createIteration,
   enforceLimits,
   parseScenario,
 } from "../packages/core/src/index.js";
@@ -34,23 +36,23 @@ describe("parser de cenários", () => {
     const sc = parseScenario(valid, "c.yaml");
     expect(sc.name).toBe("checkout");
     expect(sc.target.baseUrl).toBe("http://localhost:3000/api");
-    expect(sc.target.headers.Authorization).toBe("Bearer tok-123456");
     expect(sc.secrets).toContain("tok-123456");
     expect(sc.load.stages).toEqual([
       { durationMs: 30_000, rpsFrom: 50, rpsTo: 50 },
       { durationMs: 120_000, rpsFrom: 50, rpsTo: 300 },
     ]);
     expect(sc.load.warmupMs).toBe(10_000);
-    expect(sc.flow[0]!.request).toMatchObject({
-      method: "GET",
-      path: "/products",
-      query: { page: "2" },
-    });
-    expect(sc.flow[1]!.name).toBe("POST /cart");
-    expect(sc.flow[1]!.request.body).toBe('{"id":1}');
-    expect(sc.flow[1]!.request.contentType).toBe("application/json");
-    expect(sc.flow[1]!.expect).toEqual({ status: [200, 201], maxDurationMs: 500 });
-    expect(sc.flow[1]!.thinkMs).toBe(500);
+    const [listar, cart] = sc.flows[0]!.steps;
+    const { ctx } = createIteration(sc, 0);
+    const r1 = buildRequest(sc, listar!, ctx, "/api", "localhost:3000");
+    expect(r1).toMatchObject({ method: "GET", path: "/api/products?page=2" });
+    expect(r1.headers.Authorization).toBe("Bearer tok-123456");
+    expect(cart!.name).toBe("POST /cart");
+    const r2 = buildRequest(sc, cart!, ctx, "", "localhost:3000");
+    expect(r2.body).toBe('{"id":1}');
+    expect(r2.headers["content-type"]).toBe("application/json");
+    expect(cart!.expect).toMatchObject({ status: [200, 201], maxDurationMs: 500 });
+    expect(cart!.think).toEqual({ minMs: 500, maxMs: 500 });
   });
 
   it("aponta linha e coluna de cada erro", () => {
@@ -74,7 +76,7 @@ flow:
       const issues = (e as ScenarioError).issues;
       const byPath = Object.fromEntries(issues.map((i) => [i.path, i]));
       expect(byPath["target.baseUrl"]).toMatchObject({ line: 3 });
-      expect(byPath["load.stages[0].duration"]!.message).toMatch(/unidade/);
+      expect(byPath["load.stages[0].duration"]!.message).toMatch(/duração inválida/);
       expect(byPath["load.stages[0].duration"]).toMatchObject({ line: 6 });
       expect(byPath["load.stages[1].rps"]).toMatchObject({ line: 7 });
       expect(byPath["thresholds[0]"]).toMatchObject({ line: 8 });

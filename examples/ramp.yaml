@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
 # Rampa de carga com aquecimento, platô e thresholds (modelo aberto).
 name: ramp-demo
 target:

@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
 # Smoke test: poucas requisições para confirmar que o alvo responde.
 # Rode o alvo de demonstração antes: npm start -- --with-demo
 name: smoke-demo

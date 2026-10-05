@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
+# Dados de CSV + encadeamento: cada iteração usa a próxima linha (rodízio) de dados/clientes.csv.
+name: clientes-csv
+seed: 2026
+target:
+  baseUrl: http://127.0.0.1:4100
+load:
+  model: open
+  stages:
+    - { duration: 15s, rps: 20 }
+thresholds:
+  - "p95 < 200ms"
+  - "errorRate < 1%"
+data:
+  file: ./dados/clientes.csv
+  order: sequential # ou random (usa a semente)
+flow:
+  - name: cadastrar
+    request:
+      method: POST
+      path: /echo
+      json:
+        email: "${email}"
+        nome: "${nome}"
+        plano: "${plano}"
+        pedidoId: "${uuid()}"
+    expect:
+      status: 200
+      jsonPath:
+        "$.body.email": '~@exemplo\.test$' # regex: prefira aspas simples (sem escapes do YAML)
+        "$.body.plano": "~^(basico|pro)$"
+    extract:
+      pedido: "$.body.pedidoId"
+  - name: consultar
+    request:
+      method: GET
+      path: /echo
+      query: { pedido: "${pedido}", cliente: "${email}" }
+    expect:
+      status: 200
+      jsonPath: { "$.query.pedido": exists }
+    think: 100ms..500ms
