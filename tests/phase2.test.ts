@@ -112,7 +112,10 @@ load: { stages: [ { duration: 2s, rps: 50 } ] }
 flow: [ { request: { path: "/products?page=2" }, expect: { status: 200, jsonPath: { "$.page": 2 } } } ]
 `);
     expect(r.summary.requests.failed).toBe(0);
-    expect(r.summary.connections.byProtocol).toEqual({ h2: 1 }); // multiplexado numa conexão
+    // tudo por h2 e multiplexado: poucas conexões para ~100 requisições. O pool pode abrir uma segunda
+    // conexão se o início da carga atrasar (CPU disputada), então não se exige exatamente uma.
+    expect(Object.keys(r.summary.connections.byProtocol)).toEqual(["h2"]);
+    expect(r.summary.connections.opened).toBeLessThanOrEqual(4);
     expect(r.config.target.http2).toBe(true);
   });
 

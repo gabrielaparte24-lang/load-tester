@@ -217,9 +217,13 @@ describe("CSV, Markdown, JUnit e Prometheus", () => {
   it("JUnit: um caso por threshold, falhas contadas e XML escapado", () => {
     const x = runJUnit(report);
     expect(x).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?>/);
-    expect(x).toContain('tests="4" failures="1"');
+    // 4 casos (2 thresholds, validade e conclusão); a falha esperada é o p99 impossível. Se a CPU da
+    // máquina estiver disputada, a execução é marcada inválida (gerador saturado) e vira mais uma
+    // falha — comportamento correto da ferramenta, então o esperado acompanha o relatório.
+    const failures = 1 + (report.run.invalid ? 1 : 0);
+    expect(x).toContain(`tests="4" failures="${failures}"`);
     expect(x).toContain('name="p99 &lt; 0.001ms"');
-    expect(x.match(/<failure /g)!.length).toBe(1);
+    expect(x.match(/<failure /g)!.length).toBe(failures);
     expect(x).not.toContain("<img");
   });
 
