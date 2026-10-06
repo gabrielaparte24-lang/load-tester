@@ -204,6 +204,7 @@ extract:
   local: { header: location } # header da resposta
   pedido: { regex: "pedido=(\\d+)", group: 1 } # regex no corpo (grupo 1 por padrão se houver)
   plano: { jsonPath: "$.plano", default: basico } # valor padrão se não encontrar
+  bruto: { bytes: hex } # corpo/mensagem inteiro em hex ou base64
 ```
 
 O valor fica disponível nas etapas seguintes da mesma iteração. Se a extração falhar (sem `default`), a
@@ -259,6 +260,22 @@ por mensagem** (do último envio até a mensagem esperada) em `summary.ws`.
       - send: "texto ${sessao}"
       - expect: { bodyMatches: "^texto " }
   expect: { maxDuration: 1s } # no nível da etapa ws só vale maxDuration
+```
+
+**Mensagens binárias** — `sendBinary` envia um quadro binário a partir de `hex` (espaços ignorados) ou
+`base64`, ambos com templates, ou de um `file` (lido na validação, até 16 MB). No `expect` da mensagem,
+`type: binary | text` checa o tipo do quadro, `size` o tamanho em bytes e `hex` o conteúdo em hex
+minúsculo (matchers: `16`, `">= 4"`, `"~^4c54"`); `extract: { x: { bytes: hex } }` guarda a mensagem
+inteira para devolvê-la num `sendBinary: { hex: "${x}" }`. Checagens de texto (`bodyContains`,
+`jsonPath`…) leem quadros binários como UTF-8. Exemplo:
+[examples/websocket-binario.yaml](examples/websocket-binario.yaml).
+
+```yaml
+script:
+  - expect: { type: binary, size: 16, hex: "~^4c543031" }
+    extract: { token: { bytes: hex } }
+  - sendBinary: { hex: "${token}" } # ou { base64: "AAEC/w==" } ou { file: ./frame.bin }
+  - expect: { type: binary, size: 16 }
 ```
 
 Status: `ws:101` (sessão aberta) ou `ws:falha` (handshake recusado). Erros: `timeout` (handshake ou
@@ -691,7 +708,9 @@ em HTTP/2 sem TLS (h2c) em `http://127.0.0.1:4101` (`LT_DEMO_H2_PORT`; se a port
 só o h2c fica indisponível).
 
 - **WebSocket**: `ws://127.0.0.1:4100/ws/echo?delay=0&welcome=0` — devolve cada mensagem; JSON vira
-  `{"echo": <mensagem>, "n": <nº>}`; `welcome=1` envia `{"type":"welcome","session":"<uuid>"}` ao conectar.
+  `{"echo": <mensagem>, "n": <nº>}` e quadros binários voltam binários; `welcome=1` envia
+  `{"type":"welcome","session":"<uuid>"}` ao conectar e `welcome=binary`, um quadro binário de 16 bytes
+  (`LT01` + 12 aleatórios).
 - **gRPC** (sem TLS): `127.0.0.1:4102` (`LT_DEMO_GRPC_PORT`), serviço `demo.Greeter` em
   [packages/demo-target/proto/demo.proto](packages/demo-target/proto/demo.proto): `SayHello`,
   `Slow { ms }`, `Flaky { every | rate, code }` e os streams `Countdown { from, interval_ms, fail_at }`
@@ -738,4 +757,4 @@ Estrutura: `packages/core` (motor, métricas, cenários, relatórios), `packages
 - [x] **Fase 5** — API completa, SQLite, tempo real (SSE/WebSocket), dashboard React.
 - [x] **Extras** — WebSocket e gRPC (unário) como alvo.
 - [x] gRPC com streaming (server, client e bidi).
-- [ ] Mensagens WebSocket binárias no roteiro.
+- [x] Mensagens WebSocket binárias no roteiro (`sendBinary`, `type`/`size`/`hex`, `extract bytes`).

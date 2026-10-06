@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
+# WebSocket com mensagens binárias: o servidor manda um quadro binário de boas-vindas (16 bytes:
+# "LT01" + 12 aleatórios); o cenário extrai os bytes em hex, devolve-os num sendBinary e checa o eco.
+# sendBinary aceita hex (espaços ignorados), base64 (ambos com templates) ou um arquivo.
+# Rode o alvo de demonstração antes: npm start -- --with-demo
+name: websocket-binario
+description: Quadros binários com checagem de tipo, tamanho e conteúdo em hex
+target:
+  baseUrl: http://127.0.0.1:4100
+  timeoutMs: 5000
+load:
+  model: open
+  stages:
+    - { duration: 15s, rps: 50 }
+thresholds:
+  - "p95 < 200ms"
+  - "errorRate < 1%"
+flow:
+  - name: sessão binária
+    ws:
+      path: /ws/echo?welcome=binary
+      script:
+        - expect: { type: binary, size: 16, hex: "~^4c543031" } # "LT01"
+          extract:
+            token: { bytes: hex } # mensagem inteira em hex (ou base64)
+        - sendBinary: { hex: "${token}" }
+        - expect: { type: binary, size: 16, hex: "~^4c543031" }
+        - sendBinary: { hex: "ca fe ba be" }
+        - expect: { hex: cafebabe }
+        - sendBinary: { base64: "AAEC/w==" } # 00 01 02 ff
+        - expect: { type: binary, size: 4, hex: "000102ff" }

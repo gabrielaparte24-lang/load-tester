@@ -59,7 +59,7 @@ describe("validação de etapas ws/grpc", () => {
       ),
     ).toThrow(/não têm headers/);
     expect(err(`  - { ws: { path: /ws/echo, script: [ { send: a, sleep: 1s } ] } }`)).toThrow(
-      /exatamente um entre send, sendJson, expect e sleep/,
+      /exatamente um entre send, sendJson, sendBinary, expect e sleep/,
     );
     // variável extraída no roteiro só existe depois da extração
     expect(
@@ -208,6 +208,102 @@ describe("WebSocket como alvo", () => {
       ),
     );
     expect(closed.summary.errorsByType).toEqual({ connection_refused: 5 });
+  });
+
+  it("mensagens binárias: sendBinary (hex/base64/arquivo), tipo, tamanho, hex e extração", async () => {
+    const r = await run(
+      scenario(
+        demo.url,
+        `  - name: binario
+    ws:
+      path: /ws/echo?welcome=binary
+      script:
+        - expect: { type: binary, size: 16, hex: "~^4c543031" }
+          extract: { token: { bytes: hex } }
+        - sendBinary: { hex: "\${token}" }
+        - expect: { type: binary, size: 16, hex: "~^4c543031" }
+        - sendBinary: { base64: "AAEC/w==" }
+        - expect: { type: binary, hex: "000102ff", size: 4 }
+        - sendBinary: { hex: "ca fe ba be" }
+        - expect: { hex: cafebabe }
+        - sendBinary: { file: tests/fixtures/binario.bin }
+        - expect: { type: binary, size: 256, hex: "~^000102" }
+        - send: texto
+        - expect: { type: text, bodyContains: texto }`,
+      ),
+    );
+    const s = r.summary;
+    expect(s.requests).toEqual({ total: 40, ok: 40, failed: 0 });
+    expect(s.ws).toMatchObject({ sessions: 40, messagesSent: 200, messagesReceived: 240 });
+    // 16 + 4 + 4 + 256 + 5 bytes enviados por sessão
+    expect(s.bytes.sent).toBe(40 * (16 + 4 + 4 + 256 + 5));
+    expect(r.steps[0]!.checks.map((c) => c.name)).toEqual(
+      expect.arrayContaining([
+        "msg 1: tipo = binary",
+        "msg 1: tamanho == 16",
+        "msg 1: extrair token",
+        'msg 3: hex == "000102ff"',
+      ]),
+    );
+  });
+
+  it("mensagens binárias: validação e falhas", async () => {
+    const bad = (script: string) => () =>
+      parse(scenario("http://127.0.0.1:1", `  - ws: { path: /ws/echo, script: ${script} }`));
+    expect(bad("[ { sendBinary: { hex: 'xyz' } } ]")).toThrow(/hex inválido: use só 0-9 e a-f/);
+    expect(bad("[ { sendBinary: { hex: 'abc' } } ]")).toThrow(/número ímpar de dígitos/);
+    expect(bad("[ { sendBinary: { base64: '***' } } ]")).toThrow(/base64 inválido/);
+    expect(bad("[ { sendBinary: { hex: 'ab', base64: 'AA==' } } ]")).toThrow(
+      /exatamente um entre hex, base64 e file/,
+    );
+    expect(bad("[ { sendBinary: { file: nao-existe.bin } } ]")).toThrow(
+      /não foi possível ler "nao-existe\.bin"/,
+    );
+    expect(() =>
+      parse(
+        scenario(
+          "http://127.0.0.1:1",
+          `  - grpc: { proto: ${PROTO}, service: demo.Greeter, method: Chat, script: [ { sendBinary: { hex: ab } } ] }`,
+        ),
+      ),
+    ).toThrow(/sendBinary/);
+
+    const one = "{ stages: [ { duration: 1s, rps: 5 } ] }";
+    const wrongType = await run(
+      scenario(
+        demo.url,
+        `  - ws: { path: /ws/echo, script: [ { send: abc }, { expect: { type: binary } } ] }`,
+        one,
+      ),
+    );
+    expect(wrongType.summary.errorsByType).toEqual({ check_failed: 5 });
+    expect(wrongType.steps[0]!.failures[0]!.message).toBe(
+      "msg 1: mensagem de texto (esperado binary)",
+    );
+
+    const badRuntime = await run(
+      scenario(
+        demo.url,
+        `  - ws: { path: /ws/echo, script: [ { sendBinary: { hex: "\${pick('zz', 'yy')}" } } ] }`,
+        one,
+      ),
+    );
+    expect(badRuntime.summary.errorsByType).toEqual({ template_error: 5 });
+    expect(badRuntime.steps[0]!.failures[0]!.message).toMatch(/sendBinary: hex inválido/);
+  });
+
+  it("preview mostra o tamanho e o início dos bytes", () => {
+    const sc = parse(
+      scenario(
+        "http://127.0.0.1:4100",
+        `  - ws: { path: /ws/echo, script: [ { sendBinary: { hex: "ca fe ba be" } }, { sendBinary: { file: tests/fixtures/binario.bin } } ] }`,
+      ),
+    );
+    const body = previewIterations(sc, 1)[0]!.body!;
+    expect(body).toContain("sendBinary 4 bytes: cafebabe");
+    expect(body).toContain(
+      "sendBinary 256 bytes: 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f…",
+    );
   });
 
   it("parar no meio de uma pausa do roteiro encerra em segundos", async () => {
