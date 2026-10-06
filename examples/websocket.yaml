@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
+# WebSocket como alvo: cada iteração abre uma conexão em ws://<baseUrl>/ws/echo, troca mensagens e fecha.
+# Latência da etapa = sessão inteira (handshake + roteiro). O resumo mostra também o handshake e o
+# RTT por mensagem (do envio até a resposta esperada).
+# Rode o alvo de demonstração antes: npm start -- --with-demo
+name: websocket-echo
+description: Sessões WebSocket com mensagem de boas-vindas, eco JSON e checagens por mensagem
+target:
+  baseUrl: http://127.0.0.1:4100 # http → ws://, https → wss:// (a allowlist vale igual)
+  timeoutMs: 5000
+seed: 7
+load:
+  model: open
+  stages:
+    - { duration: 15s, rps: 50 } # 50 sessões novas por segundo
+thresholds:
+  - "p95 < 200ms"
+  - "errorRate < 1%"
+variables:
+  pedido: "${randInt(1000, 9999)}"
+flow:
+  - name: sessão de eco
+    ws:
+      path: /ws/echo?welcome=1
+      script:
+        # 1ª mensagem: boas-vindas do servidor; guarda o id da sessão
+        - expect:
+            jsonPath: { "$.type": welcome }
+            timeout: 2s
+          extract:
+            sessao: "$.session"
+        # envia JSON (templates; ${expr} sozinho preserva o tipo) e checa o eco
+        - sendJson: { pedido: "${pedido}", sessao: "${sessao}" }
+        - expect:
+            jsonPath:
+              "$.echo.pedido": ">= 1000"
+              "$.echo.sessao": "~^[0-9a-f-]{36}$"
+              "$.n": 1
+        - sleep: 50ms
+        # texto puro volta igual
+        - send: "ping ${pedido}"
+        - expect:
+            bodyContains: "ping"
+    expect:
+      maxDuration: 1s # vale para a sessão inteira

@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
+# gRPC como alvo (chamadas unárias). O endereço é sempre target.baseUrl: http = sem TLS, https = TLS
+# (target.ca para CA própria). A resposta vira JSON para checagens/extrações por JSONPath.
+# Rode o alvo de demonstração antes: npm start -- --with-demo (gRPC na porta 4102)
+name: grpc-greeter
+description: SayHello com metadados e checagens; Flaky com status esperado
+target:
+  baseUrl: http://127.0.0.1:4102
+  timeoutMs: 2000 # vira o deadline de cada chamada
+  headers:
+    x-cliente: lt # headers do alvo viram metadados gRPC
+seed: 11
+load:
+  model: open
+  stages:
+    - { duration: 15s, rps: 200 }
+thresholds:
+  - "p99 < 50ms"
+  - "errorRate < 1%"
+variables:
+  nome: "${pick('Ana', 'Bruno', 'Carla')}"
+flows:
+  - name: saudação
+    weight: 4
+    steps:
+      - name: SayHello
+        grpc:
+          proto: ../packages/demo-target/proto/demo.proto
+          service: demo.Greeter
+          method: SayHello
+          message: { name: "${nome}", times: 2 }
+          metadata: { x-pedido: "${uuid()}" }
+        expect:
+          grpcStatus: OK
+          jsonPath:
+            "$.message": "~^Olá, (Ana|Bruno|Carla)!"
+            "$.metadata.x-cliente": lt
+            "$.tags.length": 2
+        extract:
+          tamanho: "$.length"
+  - name: instável
+    weight: 1
+    steps:
+      - name: Flaky
+        grpc:
+          proto: ../packages/demo-target/proto/demo.proto
+          service: demo.Greeter
+          method: Flaky
+          message: { every: 10 }
+        expect:
+          grpcStatus: [OK, UNAVAILABLE] # falhas simuladas também são aceitas aqui

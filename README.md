@@ -224,13 +224,67 @@ expect:
 ```
 
 Matchers: valor literal (igualdade), `">0"` `">= 5"` `"<10"` `"<= 2"`, `"== ok"` `"!= erro"`,
-`"~regex"`, `exists`, `!exists`. Dica: regex em YAML fica mais simples entre aspas simples
+`"~regex"`, `exists`, `!exists`. Os matchers são valores fixos (`${…}` é recusado na validação, pois
+seria comparado literalmente); para conferir um valor dinâmico, extraia-o e use-o na etapa seguinte. Dica: regex em YAML fica mais simples entre aspas simples
 (`'~@exemplo\.test$'`).
 
 Cada checagem é contada separadamente; o resumo e o relatório mostram as reprovadas e as **mensagens de
 falha mais comuns** (ex.: `$.body.idade < 35 (recebido: 41)`). Status fora do esperado conta como
 `http_4xx`/`http_5xx`; as demais falhas como `check_failed`; templates que não puderam ser montados como
 `template_error`.
+
+### WebSocket e gRPC como alvo
+
+Além de `request` (HTTP), uma etapa pode ser `ws` ou `grpc` — exatamente um dos três. O endereço é
+**sempre** `target.baseUrl` (não há host por etapa), então allowlist, tetos de taxa/conexões e kill
+switch valem do mesmo jeito. Exemplos completos: [examples/websocket.yaml](examples/websocket.yaml) e
+[examples/grpc.yaml](examples/grpc.yaml).
+
+**WebSocket** — cada iteração abre uma conexão (`http`→`ws://`, `https`→`wss://`), roda o roteiro em
+ordem e fecha. A latência da etapa é a sessão inteira; o resumo mostra também o **handshake** e o **RTT
+por mensagem** (do último envio até a mensagem esperada) em `summary.ws`.
+
+```yaml
+- name: eco
+  ws:
+    path: /ws/echo?welcome=1
+    headers: { Authorization: "Bearer ${env.API_TOKEN}" } # + target.headers
+    subprotocols: [chat.v1] # opcional
+    script:
+      - expect: { jsonPath: { "$.type": welcome }, timeout: 2s } # espera a PRÓXIMA mensagem
+        extract: { sessao: "$.session" } # vale para as ações seguintes
+      - sendJson: { sessao: "${sessao}", n: "${iteration()}" }
+      - expect: { jsonPath: { "$.n": 1 }, bodyContains: sessao }
+      - sleep: 100ms
+      - send: "texto ${sessao}"
+      - expect: { bodyMatches: "^texto " }
+  expect: { maxDuration: 1s } # no nível da etapa ws só vale maxDuration
+```
+
+Status: `ws:101` (sessão aberta) ou `ws:falha` (handshake recusado). Erros: `timeout` (handshake ou
+mensagem que não chegou a tempo), `connection_refused`/`dns`/…, `ws_error` (HTTP ≠ 101 no handshake,
+conexão fechada pelo servidor) e `check_failed`. Checagens aparecem como `msg N: …`.
+
+**gRPC** (unário) — o `.proto` é carregado na validação (serviço, método e streaming são conferidos com
+mensagens claras). `http://` = sem TLS; `https://` = TLS (com `target.tls.ca` para CA própria).
+`target.timeoutMs` é o deadline de cada chamada; `target.headers` e `metadata` viram metadados.
+
+```yaml
+- name: SayHello
+  grpc:
+    proto: ./protos/demo.proto # relativo ao cenário
+    service: demo.Greeter # com o pacote
+    method: SayHello
+    message: { name: "${nome}", times: 2 } # JSON com templates
+    metadata: { x-pedido: "${uuid()}" }
+  expect:
+    grpcStatus: OK # padrão; aceita nome, número ou lista: [OK, NOT_FOUND]
+    jsonPath: { "$.message": "~^Olá" } # a resposta vira JSON (campos como no .proto)
+  extract: { tamanho: "$.length" }
+```
+
+Status: `grpc:OK`, `grpc:UNAVAILABLE`… Erros: `grpc_status` (código fora de `grpcStatus`), `timeout`
+(DEADLINE_EXCEEDED), `connection_refused` e `check_failed`. Streaming ainda não é suportado.
 
 ### Importar de cURL e OpenAPI
 
@@ -599,6 +653,12 @@ npm run dev:web           # Vite em http://127.0.0.1:5173 com proxy para a API
 em HTTP/2 sem TLS (h2c) em `http://127.0.0.1:4101` (`LT_DEMO_H2_PORT`; se a porta estiver ocupada,
 só o h2c fica indisponível).
 
+- **WebSocket**: `ws://127.0.0.1:4100/ws/echo?delay=0&welcome=0` — devolve cada mensagem; JSON vira
+  `{"echo": <mensagem>, "n": <nº>}`; `welcome=1` envia `{"type":"welcome","session":"<uuid>"}` ao conectar.
+- **gRPC** (sem TLS): `127.0.0.1:4102` (`LT_DEMO_GRPC_PORT`), serviço `demo.Greeter` em
+  [packages/demo-target/proto/demo.proto](packages/demo-target/proto/demo.proto): `SayHello`,
+  `Slow { ms }`, `Flaky { every | rate, code }` (e `Chat`, streaming, só para mostrar a recusa).
+
 ## Desenvolvimento
 
 ```bash
@@ -638,4 +698,5 @@ Estrutura: `packages/core` (motor, métricas, cenários, relatórios), `packages
 - [x] **Fase 3** — `lt bench`, A/B, `lt compare` com significância estatística, baseline.
 - [x] **Fase 4** — relatórios HTML/CSV/Markdown, JUnit, Prometheus, exemplo de GitHub Actions.
 - [x] **Fase 5** — API completa, SQLite, tempo real (SSE/WebSocket), dashboard React.
-- [ ] **Extras** — WebSocket e gRPC como alvo.
+- [x] **Extras** — WebSocket e gRPC (unário) como alvo.
+- [ ] gRPC com streaming; mensagens WebSocket binárias no roteiro.

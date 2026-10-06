@@ -19,15 +19,23 @@ export function freePort(): Promise<number> {
 export async function startDemo(): Promise<{
   url: string;
   h2Url: string;
+  /** gRPC (Greeter) sem TLS: http://127.0.0.1:<porta> */
+  grpcUrl: string;
   stop: () => Promise<void>;
 }> {
   const port = await freePort();
   const h2Port = await freePort();
+  const grpcPort = await freePort();
   const child: ChildProcess = spawn(
     process.execPath,
     [path.join(ROOT, "packages/demo-target/dist/main.js")],
     {
-      env: { ...process.env, LT_SERVICE_PORT: String(port), LT_DEMO_H2_PORT: String(h2Port) },
+      env: {
+        ...process.env,
+        LT_SERVICE_PORT: String(port),
+        LT_DEMO_H2_PORT: String(h2Port),
+        LT_DEMO_GRPC_PORT: String(grpcPort),
+      },
       stdio: "ignore",
     },
   );
@@ -36,7 +44,7 @@ export async function startDemo(): Promise<{
   for (;;) {
     try {
       const r = await fetch(`${url}/health`);
-      if (r.ok) break;
+      if (r.ok && (await canConnect(grpcPort))) break;
     } catch {
       /* ainda subindo */
     }
@@ -46,6 +54,7 @@ export async function startDemo(): Promise<{
   return {
     url,
     h2Url: `http://127.0.0.1:${h2Port}`,
+    grpcUrl: `http://127.0.0.1:${grpcPort}`,
     stop: () =>
       new Promise((resolve) => {
         if (child.exitCode !== null || child.signalCode !== null) return resolve();
@@ -60,4 +69,12 @@ export async function startDemo(): Promise<{
         child.kill();
       }),
   };
+}
+
+function canConnect(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = net.connect(port, "127.0.0.1");
+    sock.once("connect", () => (sock.destroy(), resolve(true)));
+    sock.once("error", () => resolve(false));
+  });
 }
