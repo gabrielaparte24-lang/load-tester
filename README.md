@@ -736,6 +736,86 @@ requests: ESLint + Prettier e a suíte completa em Linux e Windows, com Node 22 
 O resultado dos testes (JUnit) fica como artefato do job. Para validar um serviço com carga no CI, veja
 [examples/ci.yml](examples/ci.yml) (seção "CI (GitHub Actions)").
 
+## Como contribuir
+
+A branch `main` é protegida: **não aceita push direto**. Toda mudança entra por pull request, e o merge
+só é liberado quando as 5 verificações do CI passam (`lint e formatação` e `testes` em Ubuntu e
+Windows × Node 22 e 24). Force push e exclusão da `main` também são bloqueados.
+
+### Passo a passo
+
+1. **Atualize a `main` e crie uma branch** com um nome que diga o assunto
+   (`feat/…`, `fix/…`, `docs/…`, `test/…`, `ci/…`):
+
+   ```bash
+   git switch main && git pull
+   git switch -c fix/percentil-p999
+   ```
+
+2. **Instale e desenvolva** (Node ≥ 22.19):
+
+   ```bash
+   npm install           # na primeira vez
+   npm run build         # compila os pacotes e o dashboard
+   ```
+
+3. **Rode as mesmas verificações do CI antes de subir:**
+
+   ```bash
+   npm run format        # corrige a formatação (Prettier)
+   npm run lint          # ESLint
+   npm test              # compila e roda a suíte completa (~3 min)
+   ```
+
+   O CI roda `format:check`, então um arquivo sem formatar reprova o job de lint. Para um ciclo
+   rápido, `npx vitest run tests/<arquivo>.test.ts` roda só um arquivo.
+
+4. **Mantenha o que é derivado em dia:**
+   - mudou o formato do cenário (`packages/core/src/scenario/schema.ts`)? Regenere o JSON Schema com
+     `npx lt schema -o schema/scenario.schema.json --force` — um teste confere que ele está sincronizado;
+   - novo recurso ou campo de relatório? Atualize este README e, se for o caso, `docs/relatorios.md`;
+   - novo exemplo? Coloque em `examples/` (todos são validados pelos testes).
+
+5. **Faça commits pequenos**, no padrão `tipo(escopo): descrição` em português, como no histórico
+   (`git log --oneline`): `feat(core): …`, `fix(cli): …`, `test,docs: …`, `ci: …`, `style: …`.
+   A descrição diz o que mudou e, no corpo, o porquê quando não for óbvio.
+
+6. **Suba a branch e abra o pull request:**
+
+   ```bash
+   git push -u origin fix/percentil-p999
+   ```
+
+   O Git mostra o link para abrir o PR (ou use _Compare & pull request_ na página do repositório).
+   Descreva o que mudou, como foi validado e qualquer limitação.
+
+7. **Espere o CI.** Se algum teste falhar, o nome e a mensagem aparecem como anotação no run
+   (aba _Checks_ do PR). Corrija na mesma branch e dê push de novo; o PR atualiza sozinho. Alguns testes
+   medem tempo real (taxa ±2%, latências) e podem oscilar em runner compartilhado: se a falha não tiver
+   relação com a sua mudança, use _Re-run failed jobs_, e avise se acontecer com frequência.
+
+8. **Faça o merge** (merge, squash ou rebase) com as 5 verificações verdes, apague a branch e atualize
+   a sua cópia:
+
+   ```bash
+   git switch main && git pull
+   git branch -d fix/percentil-p999
+   ```
+
+### Regras do projeto
+
+- **Só teste sistemas próprios.** Testes automatizados usam o `demo-target` local (portas livres em
+  `127.0.0.1`); nunca aponte um teste para um host de terceiros nem enfraqueça a allowlist, os tetos de
+  taxa/conexões ou o kill switch. Mudanças em `safety.ts` precisam de teste que cubra o caminho de recusa.
+- **Segredos nunca entram no repositório**: tokens vêm de variáveis de ambiente/`.env` (que é ignorado) e
+  precisam sair mascarados em logs, relatórios e dashboard. Não versione `data/`, `reports/` nem `.env`.
+- **Resultados de medição precisam ser reproduzíveis**: mudou o motor ou as métricas? Mostre no PR a
+  validação (taxa pedida × enviada, percentis contra um alvo de latência conhecida) e evite flakiness
+  nos testes novos (use tolerâncias e o `demo-target` com tempos determinísticos).
+- **O `report.json` só recebe mudanças aditivas** (`schemaVersion: 1`): novos campos são opcionais e
+  relatórios antigos continuam legíveis (comparação, baselines e dashboard dependem disso). Uma quebra
+  exige novo `schemaVersion` e leitura dos dois formatos.
+
 ## Solução de problemas
 
 - **"porta 4000 já está em uso pelo PID X"** — outro programa usa a porta; altere `LT_PORT` no `.env`.
