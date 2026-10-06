@@ -204,6 +204,11 @@ export function runMarkdown(
     `| latência p50 / p95 / p99 | ${fmtNum(l.p50)} / ${fmtNum(l.p95)} / ${fmtNum(l.p99)} ms |`,
   );
   out.push(`| latência p99.9 / máx | ${fmtNum(l.p999)} / ${fmtNum(l.max)} ms |`);
+  if (s.grpcStreams) {
+    out.push(
+      `| gRPC streams | ${s.grpcStreams.streams.toLocaleString("pt-BR")} streams · ${s.grpcStreams.messagesReceived.toLocaleString("pt-BR")} mensagens recebidas · 1ª mensagem p99 ${fmtNum(s.grpcStreams.firstMessageMs.p99)} ms |`,
+    );
+  }
   if (s.ws) {
     out.push(
       `| WebSocket | ${s.ws.sessions.toLocaleString("pt-BR")} sessões · handshake p99 ${fmtNum(s.ws.connectMs.p99)} ms · RTT p50 / p99 ${fmtNum(s.ws.rttMs.p50)} / ${fmtNum(s.ws.rttMs.p99)} ms |`,

@@ -31,8 +31,10 @@ import type {
   Scenario,
   Step,
   VuStage,
+  StreamAction,
   WsAction,
   WsSpec,
+  GrpcMode,
   GrpcSpec,
 } from "./types.js";
 
@@ -467,6 +469,13 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
       bodyContains:
         e.bodyContains === undefined ? [] : ([] as string[]).concat(e.bodyContains as string),
     };
+    if (e.messages !== undefined) {
+      try {
+        expect.messages = parseMatcher(e.messages);
+      } catch (err) {
+        loc.fail([...ep, "messages"], (err as Error).message);
+      }
+    }
     for (const [jp, m] of Object.entries((e.jsonPath as Obj) ?? {})) {
       try {
         expect.jsonPath.push({ path: jp, segments: parseJsonPath(jp), matcher: parseMatcher(m) });
@@ -605,41 +614,63 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     };
   };
 
-  const compileWs = (w: Obj, wp: Path, scope: Set<string>, later: Map<string, number>): WsSpec => {
-    const local = new Set(scope); // extrações do roteiro valem para as ações seguintes
-    const script: WsAction[] = [];
+  type ScriptKind = "send" | "sendJson" | "expect" | "sleep" | "end";
+  const listPt = (xs: string[]) =>
+    xs.length > 1 ? `${xs.slice(0, -1).join(", ")} e ${xs[xs.length - 1]}` : (xs[0] ?? "");
+
+  /**
+   * Roteiro de mensagens (WebSocket e streams gRPC), em ordem. Extrações de um expect valem para
+   * as ações seguintes (e, via extractNames, para as etapas seguintes).
+   */
+  const compileScript = (
+    items: Obj[],
+    sp: Path,
+    scope: Set<string>,
+    later: Map<string, number>,
+    o: { allowed: ScriptKind[]; sendIsJson: boolean; what: string },
+  ): StreamAction[] => {
+    const local = new Set(scope);
+    const script: StreamAction[] = [];
     let expects = 0;
-    ((w.script as Obj[] | undefined) ?? []).forEach((a, i) => {
-      const ap: Path = [...wp, "script", i];
-      const kinds = ["send", "sendJson", "expect", "sleep"].filter((k) => a[k] !== undefined);
+    items.forEach((a, i) => {
+      const ap: Path = [...sp, i];
+      const kinds = (["send", "sendJson", "expect", "sleep", "end"] as const).filter(
+        (k) => a[k] !== undefined,
+      );
       if (kinds.length !== 1) {
-        loc.fail(ap, "cada ação precisa de exatamente um entre send, sendJson, expect e sleep");
+        loc.fail(ap, `cada ação precisa de exatamente um entre ${listPt(o.allowed)}`);
         return;
       }
-      if (a.extract !== undefined && a.expect === undefined) {
+      const k = kinds[0]!;
+      if (!o.allowed.includes(k)) {
+        loc.fail([...ap, k], `${k} não vale ${o.what} (use ${listPt(o.allowed)})`);
+        return;
+      }
+      if (a.extract !== undefined && k !== "expect") {
         loc.fail(
           [...ap, "extract"],
           "extract só vale junto de expect (extrai da mensagem recebida)",
         );
       }
-      if (a.send !== undefined)
+      if (k === "send" && !o.sendIsJson) {
         script.push({ kind: "send", text: tpl(a.send, [...ap, "send"], local, later) });
-      else if (a.sendJson !== undefined) {
+      } else if (k === "send" || k === "sendJson") {
         script.push({
           kind: "send",
-          json: compileJson(a.sendJson, copts, (tt, jp) =>
-            checkRefs(tt, [...ap, "sendJson", ...jp], local, later),
+          json: compileJson(a[k], copts, (tt, jp) =>
+            checkRefs(tt, [...ap, k, ...jp], local, later),
           ),
         });
-      } else if (a.sleep !== undefined)
+      } else if (k === "sleep") {
         script.push({ kind: "sleep", ms: parseDuration(a.sleep as string) });
-      else {
+      } else if (k === "end") {
+        script.push({ kind: "end" });
+      } else {
         const e = a.expect as Obj;
         const extract = compileExtract(a.extract as Obj | undefined, [...ap, "extract"]);
-        for (const [k, x] of extract) {
-          if (x.kind === "header")
-            loc.fail([...ap, "extract", k], "mensagens WebSocket não têm headers");
-          local.add(k);
+        for (const [name, x] of extract) {
+          if (x.kind === "header") loc.fail([...ap, "extract", name], "mensagens não têm headers");
+          local.add(name);
         }
         script.push({
           kind: "expect",
@@ -651,6 +682,17 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
         });
       }
     });
+    return script;
+  };
+
+  const compileWs = (w: Obj, wp: Path, scope: Set<string>, later: Map<string, number>): WsSpec => {
+    const script = compileScript(
+      (w.script as Obj[] | undefined) ?? [],
+      [...wp, "script"],
+      scope,
+      later,
+      { allowed: ["send", "sendJson", "expect", "sleep"], sendIsJson: false, what: "em WebSocket" },
+    ) as WsAction[];
     if (!script.length) loc.fail(wp, "informe um script com ao menos uma ação (send/expect/sleep)");
     return {
       path: tpl(w.path, [...wp, "path"], scope, later),
@@ -703,24 +745,59 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
       );
       return undefined;
     }
-    if (m.requestStream || m.responseStream) {
-      loc.fail(
-        [...gp, "method"],
-        "métodos com streaming ainda não são suportados; use chamadas unárias",
-      );
-      return undefined;
+    const mode: GrpcMode = m.requestStream
+      ? m.responseStream
+        ? "bidi"
+        : "client"
+      : m.responseStream
+        ? "server"
+        : "unary";
+    const sp: Path = [...gp, "script"];
+    let script: StreamAction[] = [];
+    if (mode === "unary") {
+      if (g.script !== undefined) {
+        loc.fail(sp, `${g.method} é unário: script só vale em métodos com streaming (use message)`);
+      }
+    } else {
+      if (mode !== "server" && g.message !== undefined) {
+        loc.fail(
+          [...gp, "message"],
+          `${g.method} recebe um stream do cliente: as mensagens vão no script (send)`,
+        );
+      }
+      const allowed: ScriptKind[] =
+        mode === "server"
+          ? ["expect", "sleep"]
+          : mode === "client"
+            ? ["send", "sleep", "end"]
+            : ["send", "expect", "sleep", "end"];
+      const what = {
+        server: "em server streaming (a requisição é message; o script só lê o stream)",
+        client: "em client streaming (a resposta única é checada no expect da etapa)",
+        bidi: "aqui",
+      }[mode];
+      script = compileScript((g.script as Obj[] | undefined) ?? [], sp, scope, later, {
+        allowed,
+        sendIsJson: true,
+        what,
+      });
+      if (mode !== "server" && !script.some((a) => a.kind === "send")) {
+        loc.fail(sp, `${g.method} recebe um stream do cliente: informe ao menos um send no script`);
+      }
     }
     return {
       protoFile,
       service: g.service as string,
       method: g.method as string,
       path: m.path,
+      mode,
       message: compileJson(g.message ?? {}, copts, (tt, jp) =>
         checkRefs(tt, [...gp, "message", ...jp], scope, later),
       ),
+      script,
+      deadlineMs: g.deadline !== undefined ? parseDuration(g.deadline as string) : undefined,
       metadata: tplEntries(g.metadata, [...gp, "metadata"], scope, later),
       requestSerialize: m.requestSerialize as (v: unknown) => Buffer,
-      responseSerialize: m.responseSerialize as (v: unknown) => Buffer,
       responseDeserialize: m.responseDeserialize as (b: Buffer) => unknown,
     };
   };
@@ -747,6 +824,8 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     }
     if (kind !== "grpc" && e.grpcStatus !== undefined)
       loc.fail([...ep, "grpcStatus"], "grpcStatus só vale em etapas grpc");
+    if (kind === "http" && e.messages !== undefined)
+      loc.fail([...ep, "messages"], "messages só vale em etapas grpc com streaming");
 
     if (kind === "ws") {
       const w = s.ws as Obj;
@@ -780,6 +859,8 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
           loc.fail([...p, "extract", k], "extração por header não se aplica a gRPC");
       }
       const grpc = compileGrpc(g, [...p, "grpc"], scope, later);
+      if (grpc?.mode === "unary" && e.messages !== undefined)
+        loc.fail([...ep, "messages"], "messages só vale em métodos com streaming");
       const label = `${g.service as string}/${g.method as string}`;
       return {
         name: (s.name as string | undefined) ?? `GRPC ${label}`,
@@ -814,11 +895,13 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     };
   };
 
-  /** Variáveis que uma etapa extrai (inclui as do roteiro WebSocket). */
+  /** Variáveis que uma etapa extrai (inclui as dos roteiros WebSocket/gRPC). */
   const extractNames = (s: Obj): string[] => [
     ...Object.keys((s.extract as Obj) ?? {}),
-    ...(((s.ws as Obj | undefined)?.script as Obj[] | undefined) ?? []).flatMap((a) =>
-      Object.keys((a.extract as Obj) ?? {}),
+    ...[s.ws, s.grpc].flatMap((x) =>
+      (((x as Obj | undefined)?.script as Obj[] | undefined) ?? []).flatMap((a) =>
+        Object.keys((a.extract as Obj) ?? {}),
+      ),
     ),
   ];
 

@@ -33,6 +33,8 @@ export interface ExpectSpec {
   /** gRPC: códigos de status aceitos (padrão: só OK = 0). */
   grpcStatus?: number[];
   maxDurationMs?: number;
+  /** gRPC com streaming: quantidade de mensagens recebidas. */
+  messages?: Matcher;
   jsonPath: { path: string; segments: Segment[]; matcher: Matcher }[];
   headers: { name: string; matcher: Matcher }[];
   bodyContains: string[];
@@ -64,16 +66,27 @@ export interface WsSpec {
   script: WsAction[];
 }
 
+/** Ações do roteiro de um stream gRPC: as de WebSocket (send = mensagem JSON) + end (fim do envio). */
+export type StreamAction = WsAction | { kind: "end" };
+
+/** unary | server (servidor envia stream) | client (cliente envia stream) | bidi */
+export type GrpcMode = "unary" | "server" | "client" | "bidi";
+
 export interface GrpcSpec {
   protoFile: string;
   service: string;
   method: string;
   /** "/pacote.Servico/Metodo" */
   path: string;
+  mode: GrpcMode;
+  /** Requisição única (unary e server). */
   message: JsonTemplate;
+  /** Roteiro (streams); vazio no unary. */
+  script: StreamAction[];
+  /** Prazo da chamada inteira; padrão: timeoutMs no unary, nenhum nos streams (cada espera tem timeout). */
+  deadlineMs?: number;
   metadata: [string, Template][];
   requestSerialize: (v: unknown) => Buffer;
-  responseSerialize: (v: unknown) => Buffer;
   responseDeserialize: (b: Buffer) => unknown;
 }
 

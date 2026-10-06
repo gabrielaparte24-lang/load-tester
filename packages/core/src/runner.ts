@@ -412,6 +412,7 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
     return h;
   };
   const wsResults = results.flatMap((r) => (r.ws ? [r.ws] : []));
+  const gsResults = results.flatMap((r) => (r.grpcStreams ? [r.grpcStreams] : []));
   const multiFlow = sc.flows.length > 1;
   const flat = sc.flows.flatMap((f) =>
     f.steps.map((s) => ({ flow: multiFlow ? f.name : "", step: s })),
@@ -694,6 +695,17 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
               messagesReceived: wsResults.reduce((n, w) => n + w.messagesReceived, 0),
               connectMs: latencyStats(add(wsResults.map((w) => w.connect))),
               rttMs: latencyStats(add(wsResults.map((w) => w.rtt))),
+            },
+          }
+        : {}),
+      ...(gsResults.length
+        ? {
+            grpcStreams: {
+              streams: gsResults.reduce((n, g) => n + g.streams, 0),
+              messagesSent: gsResults.reduce((n, g) => n + g.messagesSent, 0),
+              messagesReceived: gsResults.reduce((n, g) => n + g.messagesReceived, 0),
+              firstMessageMs: latencyStats(add(gsResults.map((g) => g.firstMessage))),
+              rttMs: latencyStats(add(gsResults.map((g) => g.rtt))),
             },
           }
         : {}),

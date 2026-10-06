@@ -3,7 +3,7 @@ import { stringify } from "yaml";
 import { maskHeaders, maskText } from "../secrets.js";
 import { buildRequest, createIteration, templateErrorMessage } from "./execute.js";
 import { renderJson, renderTemplate, type RenderContext, type Template } from "./template.js";
-import type { Scenario } from "./types.js";
+import type { Scenario, StreamAction } from "./types.js";
 
 export interface PreviewRequest {
   iteration: number;
@@ -14,6 +14,21 @@ export interface PreviewRequest {
   headers: Record<string, string>;
   body?: string;
   error?: string;
+}
+
+/** Roteiro de mensagens (WebSocket ou stream gRPC), uma ação por linha. */
+function describeScript(script: StreamAction[], ctx: RenderContext): string {
+  return script
+    .map((a) =>
+      a.kind === "send"
+        ? `send ${a.text ? renderTemplate(a.text, ctx) : JSON.stringify(renderJson(a.json!, ctx))}`
+        : a.kind === "sleep"
+          ? `sleep ${a.ms}ms`
+          : a.kind === "end"
+            ? "end"
+            : `expect msg ${a.index} (timeout ${a.timeoutMs}ms)`,
+    )
+    .join("\n");
 }
 
 const clip = (text: string) => (text.length > 500 ? `${text.slice(0, 500)}…` : text);
@@ -68,14 +83,7 @@ export function previewIterations(sc: Scenario, n: number): PreviewRequest[] {
             renderHeaders([...sc.target.headers, ...step.ws.headers], it.ctx),
             sc.secrets,
           );
-          const script = step.ws.script.map((a) =>
-            a.kind === "send"
-              ? `send ${a.text ? renderTemplate(a.text, it.ctx) : JSON.stringify(renderJson(a.json!, it.ctx))}`
-              : a.kind === "sleep"
-                ? `sleep ${a.ms}ms`
-                : `expect msg ${a.index} (timeout ${a.timeoutMs}ms)`,
-          );
-          entry.body = maskText(clip(script.join("\n")), sc.secrets);
+          entry.body = maskText(clip(describeScript(step.ws.script, it.ctx)), sc.secrets);
           out.push(entry);
           continue;
         }
@@ -85,10 +93,18 @@ export function previewIterations(sc: Scenario, n: number): PreviewRequest[] {
             renderHeaders([...sc.target.headers, ...step.grpc.metadata], it.ctx),
             sc.secrets,
           );
-          entry.body = maskText(
-            clip(JSON.stringify(renderJson(step.grpc.message, it.ctx))),
-            sc.secrets,
-          );
+          const g = step.grpc;
+          const lines =
+            g.mode === "unary" || g.mode === "server"
+              ? [
+                  `${g.mode === "server" ? "message " : ""}${JSON.stringify(renderJson(g.message, it.ctx))}`,
+                ]
+              : [];
+          if (g.mode !== "unary") {
+            lines.unshift(`(${g.mode} streaming)`);
+            if (g.script.length) lines.push(describeScript(g.script, it.ctx));
+          }
+          entry.body = maskText(clip(lines.join("\n")), sc.secrets);
           out.push(entry);
           continue;
         }

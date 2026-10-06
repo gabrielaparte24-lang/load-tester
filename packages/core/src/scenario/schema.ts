@@ -120,6 +120,19 @@ const grpcCode = {
   ],
 };
 
+/** Espera a PRÓXIMA mensagem (WebSocket ou stream gRPC) e a checa. */
+const messageExpect = {
+  type: "object",
+  additionalProperties: false,
+  description: "Espera a PRÓXIMA mensagem e a checa",
+  properties: {
+    jsonPath: jsonPathChecks,
+    bodyContains: { type: ["string", "array"], items: { type: "string" } },
+    bodyMatches: { type: "string" },
+    timeout: duration,
+  },
+};
+
 const ws = {
   type: "object",
   additionalProperties: false,
@@ -143,17 +156,7 @@ const ws = {
         properties: {
           send: { ...scalar, description: "Mensagem de texto (templates)" },
           sendJson: { description: "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)" },
-          expect: {
-            type: "object",
-            additionalProperties: false,
-            description: "Espera a PRÓXIMA mensagem e a checa",
-            properties: {
-              jsonPath: jsonPathChecks,
-              bodyContains: { type: ["string", "array"], items: { type: "string" } },
-              bodyMatches: { type: "string" },
-              timeout: duration,
-            },
-          },
+          expect: messageExpect,
           extract: extractSchema,
           sleep: duration,
         },
@@ -166,13 +169,36 @@ const grpc = {
   type: "object",
   additionalProperties: false,
   required: ["proto", "service", "method"],
-  description: "Chamada gRPC unária para target.baseUrl (http = sem TLS, https = TLS)",
+  description:
+    "Chamada gRPC (unária ou streaming) para target.baseUrl (http = sem TLS, https = TLS)",
   properties: {
     proto: { type: "string", description: "Arquivo .proto (relativo ao cenário)" },
     service: { type: "string", description: "Serviço com pacote, ex.: demo.Greeter" },
     method: { type: "string" },
-    message: { description: "Mensagem da requisição em JSON (templates)" },
+    message: {
+      description: "Mensagem da requisição em JSON (templates) — unário e server streaming",
+    },
     metadata: templMap,
+    deadline: {
+      ...duration,
+      description: "Prazo da chamada inteira (padrão: timeoutMs no unário; nenhum nos streams)",
+    },
+    script: {
+      type: "array",
+      description:
+        "Streams: ações em ordem — send (mensagem JSON) | expect (+ extract) | sleep | end (fim do envio)",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          send: { description: "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)" },
+          expect: messageExpect,
+          extract: extractSchema,
+          sleep: duration,
+          end: { const: true, description: "Encerra o envio (half-close); implícito no fim" },
+        },
+      },
+    },
   },
 };
 
@@ -200,6 +226,10 @@ const step = {
           anyOf: [grpcCode, { type: "array", minItems: 1, items: grpcCode }],
         },
         maxDuration: duration,
+        messages: {
+          ...matcher,
+          description: 'gRPC streaming: nº de mensagens recebidas (ex.: 5, ">= 3")',
+        },
         jsonPath: jsonPathChecks,
         headers: { type: "object", additionalProperties: matcher },
         bodyContains: { type: ["string", "array"], items: { type: "string" } },

@@ -148,6 +148,17 @@ export interface RunReport {
       connectMs: LatencyStats;
       rttMs: LatencyStats;
     };
+    /**
+     * Só com etapas gRPC de streaming. firstMessageMs = início da chamada → 1ª mensagem recebida;
+     * rttMs = envio → mensagem esperada por um expect do roteiro.
+     */
+    grpcStreams?: {
+      streams: number;
+      messagesSent: number;
+      messagesReceived: number;
+      firstMessageMs: LatencyStats;
+      rttMs: LatencyStats;
+    };
   };
   steps: StepReport[];
   timeline: TimelinePoint[];

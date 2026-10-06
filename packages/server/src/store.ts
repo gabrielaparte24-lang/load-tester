@@ -10,7 +10,11 @@ import { slugify, type RunReport } from "@lt/core";
  * Baselines usam o mesmo armazenamento do CLI (data/baselines), para valerem nos dois.
  */
 /** Exemplos adicionados depois da primeira versão do banco (importados também em bancos antigos). */
-const LATER_EXAMPLES = new Set(["examples/websocket.yaml", "examples/grpc.yaml"]);
+const LATER_EXAMPLES = new Set([
+  "examples/websocket.yaml",
+  "examples/grpc.yaml",
+  "examples/grpc-streaming.yaml",
+]);
 
 export interface ScenarioRow {
   id: string;

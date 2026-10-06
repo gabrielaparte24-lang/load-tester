@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
+import { PreciseScheduler } from "@lt/core";
 import { WebSocketServer, type WebSocket } from "ws";
 
 const MAX_SLEEP_MS = 60_000;
@@ -78,6 +79,7 @@ export function createDemoGrpcServer(): grpc.Server {
   };
   const server = new grpc.Server();
   let flakyCalls = 0;
+  const timer = new PreciseScheduler(); // intervalos precisos (setTimeout no Windows tem ~15 ms)
 
   const reply = (name: string, md: grpc.Metadata, times = 1): HelloReply => {
     const message = Array.from(
@@ -110,11 +112,67 @@ export function createDemoGrpcServer(): grpc.Server {
     if (fail) cb({ code: code || grpc.status.UNAVAILABLE, details: "falha simulada" }, null);
     else cb(null, reply("flaky", call.metadata));
   };
-  const Chat: grpc.handleBidiStreamingCall<{ name: string }, HelloReply> = (call) => {
-    call.on("data", (m: { name: string }) => call.write(reply(m.name, call.metadata)));
-    call.on("end", () => call.end());
+  const Chat: grpc.handleBidiStreamingCall<{ name: string; delay_ms: number }, HelloReply> = (
+    call,
+  ) => {
+    let pending = 0;
+    let ended = false;
+    const finish = () => ended && pending === 0 && call.end();
+    call.on("data", (m: { name: string; delay_ms: number }) => {
+      const ms = Math.min(MAX_SLEEP_MS, Math.max(0, m.delay_ms || 0));
+      const answer = () => {
+        pending--;
+        if (!call.cancelled) call.write(reply(m.name, call.metadata));
+        finish();
+      };
+      pending++;
+      // sem atraso responde na hora (setTimeout(0) no Windows pode levar ~15 ms)
+      if (ms) setTimeout(answer, ms);
+      else answer();
+    });
+    call.on("end", () => {
+      ended = true;
+      finish();
+    });
+    call.on("error", () => {});
   };
-  server.addService(pkg.demo.Greeter.service, { SayHello, Slow, Flaky, Chat });
+  const Countdown: grpc.handleServerStreamingCall<
+    { from: number; interval_ms: number; fail_at: number },
+    { n: number; remaining: number; message: string }
+  > = (call) => {
+    const { from, interval_ms, fail_at } = call.request;
+    const total = Math.max(0, Math.min(from || 0, 10_000));
+    const interval = Math.min(MAX_SLEEP_MS, Math.max(0, interval_ms || 0));
+    let sentN = 0;
+    const tick = () => {
+      if (call.cancelled) return;
+      if (fail_at > 0 && sentN >= fail_at) {
+        call.emit("error", { code: grpc.status.ABORTED, details: `falha simulada após ${sentN}` });
+        return;
+      }
+      if (sentN >= total) return call.end();
+      const n = total - sentN;
+      sentN++;
+      call.write({ n, remaining: total - sentN, message: n === 1 ? "fim!" : String(n) });
+      if (interval) timer.at(performance.now() + interval, tick);
+      else setImmediate(tick);
+    };
+    tick();
+  };
+  const Sum: grpc.handleClientStreamingCall<{ value: number }, { total: number; count: number }> = (
+    call,
+    cb,
+  ) => {
+    let total = 0;
+    let count = 0;
+    call.on("data", (m: { value: number }) => {
+      total += m.value;
+      count++;
+    });
+    call.on("end", () => cb(null, { total, count }));
+    call.on("error", () => {});
+  };
+  server.addService(pkg.demo.Greeter.service, { SayHello, Slow, Flaky, Chat, Countdown, Sum });
   return server;
 }
 

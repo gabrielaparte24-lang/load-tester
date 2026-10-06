@@ -77,6 +77,15 @@ export function printSummary(r: RunReport, reportPath: string): void {
       `  Fases ms     TTFB p50 ${fx(s.ttfbMs.p50, 2)} p99 ${fx(s.ttfbMs.p99, 2)}  download p50 ${fx(s.downloadMs.p50, 2)} p99 ${fx(s.downloadMs.p99, 2)}`,
     );
   }
+  if (s.grpcStreams) {
+    const g = s.grpcStreams;
+    out.push(
+      `  gRPC stream  ${g.streams} stream(s)  mensagens enviadas ${g.messagesSent} recebidas ${g.messagesReceived}  ` +
+        `1ª mensagem p50 ${fx(g.firstMessageMs.p50, 2)} p99 ${fx(g.firstMessageMs.p99, 2)}` +
+        (g.rttMs.count ? `  RTT p50 ${fx(g.rttMs.p50, 2)} p99 ${fx(g.rttMs.p99, 2)}` : "") +
+        " ms",
+    );
+  }
   if (s.ws) {
     out.push(
       `  WebSocket    ${s.ws.sessions} sessão(ões)  mensagens enviadas ${s.ws.messagesSent} recebidas ${s.ws.messagesReceived}  ` +

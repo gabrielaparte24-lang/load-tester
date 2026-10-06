@@ -66,6 +66,14 @@ export interface EngineResult {
     connect: string;
     rtt: string;
   };
+  /** Só com etapas gRPC de streaming. */
+  grpcStreams?: {
+    streams: number;
+    messagesSent: number;
+    messagesReceived: number;
+    firstMessage: string;
+    rtt: string;
+  };
 }
 
 export interface WorkerInit {

@@ -114,6 +114,13 @@ export class Engine {
     connect: newHistogram(),
     rtt: newHistogram(),
   };
+  private readonly grpcStreams = {
+    streams: 0,
+    sent: 0,
+    received: 0,
+    first: newHistogram(),
+    rtt: newHistogram(),
+  };
   private readonly grpc = new GrpcClients();
   private wsAgent: Agent | undefined;
   private readonly buckets = new Map<number, LocalBucket>();
@@ -531,7 +538,15 @@ export class Engine {
     const hardSignal = this.hardAbort.signal;
     if (step.kind === "grpc") {
       const client = this.grpc.get(this.base, this.sc.target.ca);
-      return runGrpcStep(step, it.ctx, { client, timeoutMs, targetHeaders: headers, hardSignal });
+      return runGrpcStep(step, it.ctx, {
+        client,
+        timeoutMs,
+        targetHeaders: headers,
+        hardSignal,
+        sleep: (ms) => this.sleepUntil(performance.now() + ms),
+        onFirstMessage: (ms) => !warmup && recordMs(this.grpcStreams.first, ms),
+        onRtt: (ms) => !warmup && recordMs(this.grpcStreams.rtt, ms),
+      });
     }
     this.wsAgent ??= new Agent({
       connections: null,
@@ -640,6 +655,10 @@ export class Engine {
           this.ws.sessions++;
           this.ws.sent += out.messagesSent ?? 0;
           this.ws.received += out.messagesReceived ?? 0;
+        } else if (step.grpc && step.grpc.mode !== "unary") {
+          this.grpcStreams.streams++;
+          this.grpcStreams.sent += out.messagesSent ?? 0;
+          this.grpcStreams.received += out.messagesReceived ?? 0;
         }
       }
       if (out.error) return; // etapas seguintes dependem desta
@@ -694,6 +713,17 @@ export class Engine {
               messagesReceived: this.ws.received,
               connect: encodeHistogram(this.ws.connect),
               rtt: encodeHistogram(this.ws.rtt),
+            },
+          }
+        : {}),
+      ...(this.grpcStreams.streams
+        ? {
+            grpcStreams: {
+              streams: this.grpcStreams.streams,
+              messagesSent: this.grpcStreams.sent,
+              messagesReceived: this.grpcStreams.received,
+              firstMessage: encodeHistogram(this.grpcStreams.first),
+              rtt: encodeHistogram(this.grpcStreams.rtt),
             },
           }
         : {}),

@@ -417,7 +417,7 @@
             "type": "object",
             "additionalProperties": false,
             "required": ["proto", "service", "method"],
-            "description": "Chamada gRPC unária para target.baseUrl (http = sem TLS, https = TLS)",
+            "description": "Chamada gRPC (unária ou streaming) para target.baseUrl (http = sem TLS, https = TLS)",
             "properties": {
               "proto": {
                 "type": "string",
@@ -431,12 +431,103 @@
                 "type": "string"
               },
               "message": {
-                "description": "Mensagem da requisição em JSON (templates)"
+                "description": "Mensagem da requisição em JSON (templates) — unário e server streaming"
               },
               "metadata": {
                 "type": "object",
                 "additionalProperties": {
                   "type": ["string", "number", "boolean"]
+                }
+              },
+              "deadline": {
+                "type": "string",
+                "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")",
+                "description": "Prazo da chamada inteira (padrão: timeoutMs no unário; nenhum nos streams)"
+              },
+              "script": {
+                "type": "array",
+                "description": "Streams: ações em ordem — send (mensagem JSON) | expect (+ extract) | sleep | end (fim do envio)",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "send": {
+                      "description": "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)"
+                    },
+                    "expect": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Espera a PRÓXIMA mensagem e a checa",
+                      "properties": {
+                        "jsonPath": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": ["string", "number", "boolean", "null"],
+                            "description": "200, true, \"texto\", \">0\", \">= 5\", \"== ok\", \"!= x\", \"~regex\", \"exists\", \"!exists\""
+                          },
+                          "propertyNames": {
+                            "pattern": "^\\$",
+                            "x-erro": "JSONPath deve começar com \"$\""
+                          }
+                        },
+                        "bodyContains": {
+                          "type": ["string", "array"],
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "bodyMatches": {
+                          "type": "string"
+                        },
+                        "timeout": {
+                          "type": "string",
+                          "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                          "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                        }
+                      }
+                    },
+                    "extract": {
+                      "type": "object",
+                      "propertyNames": {
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                        "x-erro": "nome inválido: use letras, números e _ (começando por letra ou _)"
+                      },
+                      "additionalProperties": {
+                        "type": ["string", "object"],
+                        "pattern": "^\\$",
+                        "x-erro": "use um JSONPath (\"$.id\") ou { jsonPath | regex | header }",
+                        "additionalProperties": false,
+                        "properties": {
+                          "jsonPath": {
+                            "type": "string",
+                            "pattern": "^\\$",
+                            "x-erro": "JSONPath deve começar com \"$\""
+                          },
+                          "regex": {
+                            "type": "string"
+                          },
+                          "group": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "header": {
+                            "type": "string"
+                          },
+                          "default": {}
+                        }
+                      }
+                    },
+                    "sleep": {
+                      "type": "string",
+                      "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                      "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                    },
+                    "end": {
+                      "const": true,
+                      "description": "Encerra o envio (half-close); implícito no fim"
+                    }
+                  }
                 }
               }
             }
@@ -531,6 +622,10 @@
                 "type": "string",
                 "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
                 "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+              },
+              "messages": {
+                "type": ["string", "number", "boolean", "null"],
+                "description": "gRPC streaming: nº de mensagens recebidas (ex.: 5, \">= 3\")"
               },
               "jsonPath": {
                 "type": "object",
@@ -827,7 +922,7 @@
                   "type": "object",
                   "additionalProperties": false,
                   "required": ["proto", "service", "method"],
-                  "description": "Chamada gRPC unária para target.baseUrl (http = sem TLS, https = TLS)",
+                  "description": "Chamada gRPC (unária ou streaming) para target.baseUrl (http = sem TLS, https = TLS)",
                   "properties": {
                     "proto": {
                       "type": "string",
@@ -841,12 +936,103 @@
                       "type": "string"
                     },
                     "message": {
-                      "description": "Mensagem da requisição em JSON (templates)"
+                      "description": "Mensagem da requisição em JSON (templates) — unário e server streaming"
                     },
                     "metadata": {
                       "type": "object",
                       "additionalProperties": {
                         "type": ["string", "number", "boolean"]
+                      }
+                    },
+                    "deadline": {
+                      "type": "string",
+                      "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                      "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")",
+                      "description": "Prazo da chamada inteira (padrão: timeoutMs no unário; nenhum nos streams)"
+                    },
+                    "script": {
+                      "type": "array",
+                      "description": "Streams: ações em ordem — send (mensagem JSON) | expect (+ extract) | sleep | end (fim do envio)",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "send": {
+                            "description": "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)"
+                          },
+                          "expect": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "description": "Espera a PRÓXIMA mensagem e a checa",
+                            "properties": {
+                              "jsonPath": {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "type": ["string", "number", "boolean", "null"],
+                                  "description": "200, true, \"texto\", \">0\", \">= 5\", \"== ok\", \"!= x\", \"~regex\", \"exists\", \"!exists\""
+                                },
+                                "propertyNames": {
+                                  "pattern": "^\\$",
+                                  "x-erro": "JSONPath deve começar com \"$\""
+                                }
+                              },
+                              "bodyContains": {
+                                "type": ["string", "array"],
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "bodyMatches": {
+                                "type": "string"
+                              },
+                              "timeout": {
+                                "type": "string",
+                                "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                                "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                              }
+                            }
+                          },
+                          "extract": {
+                            "type": "object",
+                            "propertyNames": {
+                              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                              "x-erro": "nome inválido: use letras, números e _ (começando por letra ou _)"
+                            },
+                            "additionalProperties": {
+                              "type": ["string", "object"],
+                              "pattern": "^\\$",
+                              "x-erro": "use um JSONPath (\"$.id\") ou { jsonPath | regex | header }",
+                              "additionalProperties": false,
+                              "properties": {
+                                "jsonPath": {
+                                  "type": "string",
+                                  "pattern": "^\\$",
+                                  "x-erro": "JSONPath deve começar com \"$\""
+                                },
+                                "regex": {
+                                  "type": "string"
+                                },
+                                "group": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "header": {
+                                  "type": "string"
+                                },
+                                "default": {}
+                              }
+                            }
+                          },
+                          "sleep": {
+                            "type": "string",
+                            "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                            "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                          },
+                          "end": {
+                            "const": true,
+                            "description": "Encerra o envio (half-close); implícito no fim"
+                          }
+                        }
                       }
                     }
                   }
@@ -941,6 +1127,10 @@
                       "type": "string",
                       "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
                       "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                    },
+                    "messages": {
+                      "type": ["string", "number", "boolean", "null"],
+                      "description": "gRPC streaming: nº de mensagens recebidas (ex.: 5, \">= 3\")"
                     },
                     "jsonPath": {
                       "type": "object",
