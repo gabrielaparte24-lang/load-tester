@@ -1,0 +1,72 @@
+# Integração contínua: lint/formatação e a suíte de testes (Vitest) em Linux e Windows.
+# Os testes sobem o demo-target em portas livres de 127.0.0.1; nada sai do runner.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint e formatação
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier
+        run: npm run format:check
+
+  test:
+    name: testes (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 22 = versão mínima suportada (engines >= 22.19); 24 = LTS atual
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Compila (TypeScript + dashboard)
+        run: npm run build
+
+      - name: Testes
+        run: npx vitest run --reporter=default --reporter=junit --outputFile.junit=reports/junit.xml
+
+      - name: Guarda o resultado dos testes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-node${{ matrix.node }}
+          path: reports/junit.xml
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,5 +1,7 @@
 # lt — testador de carga e benchmarking de endpoints HTTP
 
+[![ci](https://github.com/gabrielaparte24-lang/load-tester/actions/workflows/ci.yml/badge.svg)](https://github.com/gabrielaparte24-lang/load-tester/actions/workflows/ci.yml)
+
 CLI + dashboard em tempo real + relatórios reproduzíveis, com métricas estatisticamente corretas
 (HdrHistogram, correção de omissão coordenada) e thresholds para CI.
 
@@ -728,6 +730,11 @@ npm run format      # Prettier
 Estrutura: `packages/core` (motor, métricas, cenários, relatórios), `packages/cli` (`lt`), `packages/server`
 (API, SQLite, SSE), `packages/web` (dashboard React + Vite),
 `packages/demo-target`, `scripts/` (operação), `examples/`, `tests/`.
+
+O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) roda em cada push na `main` e em pull
+requests: ESLint + Prettier e a suíte completa em Linux e Windows, com Node 22 (mínimo suportado) e 24.
+O resultado dos testes (JUnit) fica como artefato do job. Para validar um serviço com carga no CI, veja
+[examples/ci.yml](examples/ci.yml) (seção "CI (GitHub Actions)").
 
 ## Solução de problemas
 
