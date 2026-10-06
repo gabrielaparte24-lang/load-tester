@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// npm run stop [-- --clean-logs] [-- --timeout=10]
+// npm run stop [-- --clean-logs] [-- --timeout=20]
 // Encerra apenas processos do lt: testes em andamento no CLI (salvando o parcial), servidor e demo-target.
 import fs from "node:fs";
 import path from "node:path";
@@ -25,7 +25,7 @@ import {
 // via npx o caminho passa por node_modules/@lt/cli; direto, por packages/cli
 const CLI_ENTRY = /(@lt|packages)\/cli\/(bin\/lt\.js|dist\/index\.js)/;
 const flags = parseArgs(process.argv.slice(2), ["clean-logs", "timeout"]);
-const timeoutMs = Math.max(1, Number(flags.timeout ?? 10)) * 1000;
+const timeoutMs = Math.max(1, Number(flags.timeout ?? 20)) * 1000;
 let failures = 0;
 
 async function terminate(pid, label, graceful) {

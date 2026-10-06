@@ -11,7 +11,8 @@
     "packages/core",
     "packages/demo-target",
     "packages/server",
-    "packages/cli"
+    "packages/cli",
+    "packages/web"
   ],
   "scripts": {
     "setup": "node scripts/setup.mjs",
@@ -19,14 +20,15 @@
     "stop": "node scripts/stop.mjs",
     "status": "node scripts/status.mjs",
     "restart": "node scripts/restart.mjs",
-    "build": "tsc -b",
+    "build": "tsc -b && npm run build -w @lt/web",
     "clean": "tsc -b --clean",
     "lt": "node packages/cli/bin/lt.js",
     "test": "tsc -b && vitest run",
     "test:unit": "vitest run",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "dev:web": "npm run dev -w @lt/web"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -153,6 +153,7 @@ export function setupState() {
     !fs.existsSync(path.join(ROOT, "packages/cli/dist/index.js"))
   )
     missing.push("build dos pacotes (dist)");
+  if (!fs.existsSync(path.join(ROOT, "packages/web/dist/index.html"))) missing.push("build do dashboard");
   if (!fs.existsSync(path.join(ROOT, ".env"))) missing.push("arquivo .env");
   return { ok: missing.length === 0, missing };
 }
