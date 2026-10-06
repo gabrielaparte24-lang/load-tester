@@ -1,4 +1,5 @@
 import { getConfig } from "@lt/core";
+import { attachDemoWebSocket, createDemoGrpcServer, listenGrpc } from "./extras.js";
 import { createDemoH2Server, createDemoServer } from "./server.js";
 
 const cfg = getConfig();
@@ -13,6 +14,10 @@ const server = createDemoServer(demoOpts);
 // HTTP/2 sem TLS (h2c) na porta seguinte; opcional: se a porta estiver ocupada, só avisa
 const h2Port = Number(process.env.LT_DEMO_H2_PORT || port + 1);
 const h2 = createDemoH2Server(demoOpts);
+// WebSocket no próprio servidor HTTP (/ws/echo) e gRPC na porta +2 (opcional, como o h2c)
+const ws = attachDemoWebSocket(server);
+const grpcPort = Number(process.env.LT_DEMO_GRPC_PORT || port + 2);
+const grpcServer = createDemoGrpcServer();
 
 let closing = false;
 function shutdown(reason: string): void {
@@ -20,6 +25,8 @@ function shutdown(reason: string): void {
   closing = true;
   console.log(`[demo-target] encerrando (${reason})`);
   h2.close();
+  ws.closeAll();
+  grpcServer.forceShutdown();
   server.close(() => process.exit(0));
   // conexões keep-alive ficam ociosas assim que a resposta em andamento termina
   setInterval(() => server.closeIdleConnections(), 50).unref();
@@ -38,7 +45,9 @@ server.on("error", (err: NodeJS.ErrnoException) => {
 });
 
 server.listen(port, cfg.host, () => {
-  console.log(`[demo-target] pid ${process.pid} ouvindo em http://${cfg.host}:${port}`);
+  console.log(
+    `[demo-target] pid ${process.pid} ouvindo em http://${cfg.host}:${port} (WebSocket: ws://${cfg.host}:${port}/ws/echo)`,
+  );
 });
 
 h2.on("error", (err: NodeJS.ErrnoException) => {
@@ -49,3 +58,12 @@ h2.on("error", (err: NodeJS.ErrnoException) => {
 h2.listen(h2Port, cfg.host, () => {
   console.log(`[demo-target] HTTP/2 (h2c) em http://${cfg.host}:${h2Port}`);
 });
+
+listenGrpc(grpcServer, cfg.host, grpcPort).then(
+  (p) =>
+    console.log(
+      `[demo-target] gRPC em ${cfg.host}:${p} (proto: packages/demo-target/proto/demo.proto)`,
+    ),
+  (err: Error) =>
+    console.warn(`[demo-target] gRPC indisponível em ${cfg.host}:${grpcPort}: ${err.message}`),
+);

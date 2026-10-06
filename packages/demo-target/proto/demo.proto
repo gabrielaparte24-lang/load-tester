@@ -1,0 +1,39 @@
+// Serviço gRPC de demonstração (lt / demo-target). Só chamadas unárias são suportadas como alvo;
+// Chat (streaming) existe para mostrar a mensagem de erro do validador.
+syntax = "proto3";
+
+package demo;
+
+service Greeter {
+  // Responde na hora: "Olá, <name>!" (repetido `times` vezes) e ecoa os metadados recebidos.
+  rpc SayHello (HelloRequest) returns (HelloReply);
+  // Responde após `ms` milissegundos (máx. 60 s).
+  rpc Slow (SlowRequest) returns (HelloReply);
+  // Falha com o status `code` (padrão 14 = UNAVAILABLE) a cada `every` chamadas ou com probabilidade `rate`.
+  rpc Flaky (FlakyRequest) returns (HelloReply);
+  rpc Chat (stream HelloRequest) returns (stream HelloReply);
+}
+
+message HelloRequest {
+  string name = 1;
+  int32 times = 2;
+}
+
+message SlowRequest {
+  int32 ms = 1;
+  string name = 2;
+}
+
+message FlakyRequest {
+  int32 every = 1;
+  double rate = 2;
+  int32 code = 3;
+}
+
+message HelloReply {
+  string message = 1;
+  int32 length = 2;
+  repeated string tags = 3;
+  int64 served_at = 4;
+  map<string, string> metadata = 5;
+}

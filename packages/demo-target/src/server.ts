@@ -3,6 +3,8 @@ import http2 from "node:http2";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { PreciseScheduler } from "@lt/core";
 
+export * from "./extras.js";
+
 /**
  * Servidor-alvo de demonstração, com latência e erros controláveis:
  *   GET  /fast                      200 imediato
@@ -15,6 +17,7 @@ import { PreciseScheduler } from "@lt/core";
  *   GET  /products?page=1           lista paginada (para cenários encadeados)
  *   GET  /products/:id              detalhe
  *   GET  /health                    identificação do serviço
+ *   WS   /ws/echo?delay=0&welcome=0  eco WebSocket (ver extras.ts); gRPC Greeter na porta +2
  */
 export interface DemoOptions {
   host?: string;
