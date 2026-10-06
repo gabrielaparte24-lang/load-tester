@@ -58,6 +58,14 @@ export interface EngineResult {
   cpuMicros: number;
   stopAtRelMs: number | null;
   maxVus: number;
+  /** Só quando há etapas WebSocket: sessões, mensagens e tempos (handshake, RTT por mensagem). */
+  ws?: {
+    sessions: number;
+    messagesSent: number;
+    messagesReceived: number;
+    connect: string;
+    rtt: string;
+  };
 }
 
 export interface WorkerInit {

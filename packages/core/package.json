@@ -12,6 +12,8 @@
     }
   },
   "dependencies": {
+    "@grpc/grpc-js": "1.14.5",
+    "@grpc/proto-loader": "0.8.1",
     "ajv": "8.20.0",
     "hdr-histogram-js": "3.0.1",
     "undici": "8.11.2",

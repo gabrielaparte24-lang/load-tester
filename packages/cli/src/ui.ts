@@ -72,9 +72,17 @@ export function printSummary(r: RunReport, reportPath: string): void {
   out.push(
     `  Serviço ms   p50 ${fx(s.serviceTimeMs.p50, 2)}  p99 ${fx(s.serviceTimeMs.p99, 2)}  ${c.dim("(do envio real até a resposta)")}`,
   );
-  out.push(
-    `  Fases ms     TTFB p50 ${fx(s.ttfbMs.p50, 2)} p99 ${fx(s.ttfbMs.p99, 2)}  download p50 ${fx(s.downloadMs.p50, 2)} p99 ${fx(s.downloadMs.p99, 2)}`,
-  );
+  if (s.ttfbMs.count) {
+    out.push(
+      `  Fases ms     TTFB p50 ${fx(s.ttfbMs.p50, 2)} p99 ${fx(s.ttfbMs.p99, 2)}  download p50 ${fx(s.downloadMs.p50, 2)} p99 ${fx(s.downloadMs.p99, 2)}`,
+    );
+  }
+  if (s.ws) {
+    out.push(
+      `  WebSocket    ${s.ws.sessions} sessão(ões)  mensagens enviadas ${s.ws.messagesSent} recebidas ${s.ws.messagesReceived}  ` +
+        `handshake p50 ${fx(s.ws.connectMs.p50, 2)} p99 ${fx(s.ws.connectMs.p99, 2)}  RTT p50 ${fx(s.ws.rttMs.p50, 2)} p99 ${fx(s.ws.rttMs.p99, 2)} ms`,
+    );
+  }
   const cn = s.connections;
   if (cn.opened) {
     const protos = Object.entries(cn.byProtocol)

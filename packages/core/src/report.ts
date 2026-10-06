@@ -140,6 +140,14 @@ export interface RunReport {
     errorsByType: Partial<Record<ErrorType, number>>;
     bytes: { received: number; sent: number };
     checks: { passed: number; failed: number };
+    /** Só com etapas WebSocket. connectMs = handshake; rttMs = do envio até a mensagem esperada. */
+    ws?: {
+      sessions: number;
+      messagesSent: number;
+      messagesReceived: number;
+      connectMs: LatencyStats;
+      rttMs: LatencyStats;
+    };
   };
   steps: StepReport[];
   timeline: TimelinePoint[];

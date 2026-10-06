@@ -68,6 +68,7 @@ export function buildRequest(
   host: string,
 ): BuiltRequest {
   const rq = step.request;
+  if (!rq) throw new Error(`etapa "${step.name}" não é HTTP`);
   let p = renderTemplate(rq.path, ctx);
   if (rq.query.length) {
     const qs = new URLSearchParams(

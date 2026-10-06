@@ -28,6 +28,11 @@ export function parseMatcher(spec: unknown): Matcher {
     };
   }
   const s = spec.trim();
+  if (s.includes("${")) {
+    throw new MatcherError(
+      "checagens comparam com valores fixos (${…} não é avaliado aqui); para validar um valor dinâmico, extraia-o e use-o na etapa seguinte",
+    );
+  }
   if (s === "exists") return { label: "existe", test: (found) => found };
   if (s === "!exists" || s === "notExists") return { label: "não existe", test: (found) => !found };
   if (s.startsWith("~")) {

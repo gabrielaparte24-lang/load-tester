@@ -366,14 +366,14 @@ ${baseline}
 <div class="grid2" style="margin-top:16px">
   <div class="card"><h2>Fases da requisição (ms)</h2>
     <div class="scroll"><table><thead><tr><th>fase</th><th class="num">p50</th><th class="num">p90</th><th class="num">p95</th><th class="num">p99</th><th class="num">p99.9</th><th class="num">máx</th><th class="num">média</th><th class="num">n</th></tr></thead><tbody>
-    ${latRow("latência (desde o previsto)", l)}${latRow("tempo de serviço", s.serviceTimeMs)}${latRow("TTFB", s.ttfbMs)}${latRow("download", s.downloadMs)}
+    ${latRow("latência (desde o previsto)", l)}${latRow("tempo de serviço", s.serviceTimeMs)}${s.ttfbMs.count ? `${latRow("TTFB", s.ttfbMs)}${latRow("download", s.downloadMs)}` : ""}${s.ws ? `${latRow("WS: handshake", s.ws.connectMs)}${latRow("WS: RTT por mensagem", s.ws.rttMs)}` : ""}
     ${cn.opened ? `${latRow("DNS (por conexão)", cn.dnsMs)}${latRow("TCP (por conexão)", cn.connectMs)}${cn.tlsMs.max ? latRow("TLS (por conexão)", cn.tlsMs) : ""}` : ""}
     </tbody></table></div>
     <p class="muted">${cn.opened} conexão(ões) nova(s): ${
       Object.entries(cn.byProtocol)
         .map(([k, v]) => `${esc(k)} ${v}`)
         .join(", ") || "—"
-    }. Bytes recebidos ${s.bytes.received.toLocaleString("pt-BR")}, enviados ${s.bytes.sent.toLocaleString("pt-BR")}.</p>
+    }. Bytes recebidos ${s.bytes.received.toLocaleString("pt-BR")}, enviados ${s.bytes.sent.toLocaleString("pt-BR")}.${s.ws ? ` WebSocket: ${s.ws.sessions.toLocaleString("pt-BR")} sessão(ões), ${s.ws.messagesSent.toLocaleString("pt-BR")} mensagem(ns) enviada(s) e ${s.ws.messagesReceived.toLocaleString("pt-BR")} recebida(s).` : ""}</p>
   </div>
   <div class="card"><h2>Gerador e máquina</h2>
     <table><tbody>

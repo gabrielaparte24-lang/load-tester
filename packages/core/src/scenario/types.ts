@@ -30,6 +30,8 @@ export interface RequestSpec {
 export interface ExpectSpec {
   /** Status aceitos; se ausente, qualquer status < 400 é sucesso. */
   status?: number[];
+  /** gRPC: códigos de status aceitos (padrão: só OK = 0). */
+  grpcStatus?: number[];
   maxDurationMs?: number;
   jsonPath: { path: string; segments: Segment[]; matcher: Matcher }[];
   headers: { name: string; matcher: Matcher }[];
@@ -42,9 +44,52 @@ export type Extractor =
   | { kind: "regex"; re: RegExp; group: number; default?: unknown }
   | { kind: "header"; name: string; default?: unknown };
 
+/** Ação do roteiro de uma etapa WebSocket. */
+export type WsAction =
+  | { kind: "send"; text?: Template; json?: JsonTemplate }
+  | {
+      kind: "expect";
+      /** Espera a PRÓXIMA mensagem por até timeoutMs e a checa. */
+      timeoutMs: number;
+      expect: ExpectSpec;
+      extract: [string, Extractor][];
+      index: number;
+    }
+  | { kind: "sleep"; ms: number };
+
+export interface WsSpec {
+  path: Template;
+  headers: [string, Template][];
+  subprotocols: string[];
+  script: WsAction[];
+}
+
+export interface GrpcSpec {
+  protoFile: string;
+  service: string;
+  method: string;
+  /** "/pacote.Servico/Metodo" */
+  path: string;
+  message: JsonTemplate;
+  metadata: [string, Template][];
+  requestSerialize: (v: unknown) => Buffer;
+  responseSerialize: (v: unknown) => Buffer;
+  responseDeserialize: (b: Buffer) => unknown;
+}
+
+export type StepKind = "http" | "ws" | "grpc";
+
 export interface Step {
   name: string;
-  request: RequestSpec;
+  kind: StepKind;
+  /** Verbo HTTP, "WS" ou "GRPC" (relatórios). */
+  method: string;
+  /** Caminho HTTP/WS ou "Servico/Metodo" gRPC (relatórios). */
+  path: string;
+  /** Presente quando kind = "http". */
+  request?: RequestSpec;
+  ws?: WsSpec;
+  grpc?: GrpcSpec;
   expect: ExpectSpec;
   extract: [string, Extractor][];
   /** Tempo de pensamento após a etapa: fixo (min = max) ou uniforme em [min, max]. */

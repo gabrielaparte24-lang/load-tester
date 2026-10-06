@@ -411,6 +411,7 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
     for (const s of b64s) if (s) h.add(decodeHistogram(s));
     return h;
   };
+  const wsResults = results.flatMap((r) => (r.ws ? [r.ws] : []));
   const multiFlow = sc.flows.length > 1;
   const flat = sc.flows.flatMap((f) =>
     f.steps.map((s) => ({ flow: multiFlow ? f.name : "", step: s })),
@@ -471,8 +472,8 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
     stepReports.push({
       flow,
       name: step.name,
-      method: step.request.method,
-      path: step.label.slice(step.request.method.length + 1),
+      method: step.method,
+      path: step.path,
       requests: rq,
       errors: er,
       errorRate: rq ? round(er / rq, 6) : 0,
@@ -685,6 +686,17 @@ export async function runScenario(sc: Scenario, opts: RunOptions): Promise<RunRe
       errorsByType,
       bytes: { received: bytesIn, sent: bytesOut },
       checks: { passed: checksPassed, failed: checksFailed },
+      ...(wsResults.length
+        ? {
+            ws: {
+              sessions: wsResults.reduce((n, w) => n + w.sessions, 0),
+              messagesSent: wsResults.reduce((n, w) => n + w.messagesSent, 0),
+              messagesReceived: wsResults.reduce((n, w) => n + w.messagesReceived, 0),
+              connectMs: latencyStats(add(wsResults.map((w) => w.connect))),
+              rttMs: latencyStats(add(wsResults.map((w) => w.rtt))),
+            },
+          }
+        : {}),
     },
     steps: stepReports,
     timeline,

@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import { Pool } from "undici";
+import { Agent, Pool } from "undici";
 import {
   StepMetrics,
   classifyError,
@@ -23,8 +23,11 @@ import {
   type Iteration,
   type ResponseData,
 } from "../scenario/execute.js";
-import type { Scenario, VuStage } from "../scenario/types.js";
-import { instrumentedConnector } from "./connector.js";
+import type { Scenario, Step, VuStage } from "../scenario/types.js";
+import { GrpcClients, runGrpcStep } from "../protocols/grpc.js";
+import type { ProtocolOutcome } from "../protocols/outcome.js";
+import { runWsStep } from "../protocols/ws.js";
+import { instrumentedConnector, type ConnectionTiming } from "./connector.js";
 import type { BucketData, EngineConfig, EngineResult, StepResult } from "./protocol.js";
 
 const BURST_TOLERANCE_MS = 100;
@@ -104,6 +107,15 @@ export class Engine {
     connect: newHistogram(),
     tls: newHistogram(),
   };
+  private readonly ws = {
+    sessions: 0,
+    sent: 0,
+    received: 0,
+    connect: newHistogram(),
+    rtt: newHistogram(),
+  };
+  private readonly grpc = new GrpcClients();
+  private wsAgent: Agent | undefined;
   private readonly buckets = new Map<number, LocalBucket>();
   private readonly sleepers = new Set<() => void>();
   private readonly counters = {
@@ -141,41 +153,41 @@ export class Engine {
       allowH2: sc.target.http2,
       connect: instrumentedConnector(
         { timeoutMs: sc.target.timeoutMs, http2: sc.target.http2, ca: sc.target.ca },
-        (t) => {
-          this.conn.opened++;
-          this.conn.byProtocol[t.protocol] = (this.conn.byProtocol[t.protocol] ?? 0) + 1;
-          recordMs(this.conn.dns, t.dnsMs);
-          recordMs(this.conn.connect, t.connectMs);
-          recordMs(this.conn.tls, t.tlsMs);
-        },
+        (t) => this.onConnection(t),
       ),
     });
     const multiFlow = sc.flows.length > 1;
     this.flowMetrics = sc.flows.map((f) =>
-      f.steps.map(
-        (s) =>
-          new StepMetrics(
-            s.name,
-            s.request.method,
-            s.label.slice(s.request.method.length + 1),
-            multiFlow ? f.name : "",
-          ),
-      ),
+      f.steps.map((s) => new StepMetrics(s.name, s.method, s.path, multiFlow ? f.name : "")),
     );
     this.tokenInterval = cfg.maxRps > 0 ? 1000 / cfg.maxRps : 0;
+  }
+
+  private onConnection(t: ConnectionTiming): void {
+    this.conn.opened++;
+    this.conn.byProtocol[t.protocol] = (this.conn.byProtocol[t.protocol] ?? 0) + 1;
+    recordMs(this.conn.dns, t.dnsMs);
+    recordMs(this.conn.connect, t.connectMs);
+    recordMs(this.conn.tls, t.tlsMs);
   }
 
   // ------------------------------------------------------------ ciclo de vida
 
   async run(startEpochMs: number): Promise<{ result: EngineResult; finalBuckets: BucketData[] }> {
     this.startPerf = startEpochMs - performance.timeOrigin;
+    // gRPC: abre o canal antes do início (a primeira conexão do grpc-js trava o event loop por alguns ms)
+    if (this.sc.flows.some((f) => f.steps.some((st) => st.kind === "grpc"))) {
+      const client = this.grpc.get(this.base, this.sc.target.ca);
+      const deadline = Math.max(this.startPerf - performance.now(), 50);
+      await new Promise<void>((r) => client.waitForReady(Date.now() + deadline, () => r()));
+    }
     const flushTimer = setInterval(() => this.flush(false), 250);
+    const wait = this.startPerf - performance.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     const lagTimer = setInterval(() => {
       const t0 = performance.now();
       setImmediate(() => recordMs(this.loopLag, performance.now() - t0));
     }, 100);
-    const wait = this.startPerf - performance.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 
     if (this.sc.load.model === "open") this.startOpen();
     else this.startClosed();
@@ -184,7 +196,11 @@ export class Engine {
     clearInterval(flushTimer);
     clearInterval(lagTimer);
     this.timer.clear();
-    await (this.hardAbort.signal.aborted ? this.pool.destroy() : this.pool.close()).catch(() => {});
+    const hard = this.hardAbort.signal.aborted;
+    await Promise.all(
+      [this.pool, this.wsAgent].map((d) => d && (hard ? d.destroy() : d.close()).catch(() => {})),
+    );
+    this.grpc.close();
     const finalBuckets = this.flush(true);
     return { result: this.result(), finalBuckets };
   }
@@ -482,6 +498,60 @@ export class Engine {
     }
   }
 
+  private async sendHttp(
+    step: Step,
+    req: BuiltRequest,
+    intended: number,
+    it: Iteration,
+  ): Promise<ProtocolOutcome> {
+    const out = await this.send(req, step.needsBody);
+    if (!out.res)
+      return {
+        error: out.error,
+        message: out.message,
+        checks: [],
+        bytesIn: 0,
+        bytesOut: req.bytesOut,
+      };
+    const ev: Evaluation = evaluateResponse(step, out.res, performance.now() - intended, it.ctx);
+    return {
+      statusKey: String(out.res.status),
+      error: ev.error,
+      message: ev.message,
+      checks: ev.checks,
+      bytesIn: out.bytesIn,
+      bytesOut: req.bytesOut,
+      firstByteAt: out.headersAt,
+    };
+  }
+
+  private sendOther(step: Step, it: Iteration, warmup: boolean): Promise<ProtocolOutcome> {
+    const headers = this.sc.target.headers;
+    const timeoutMs = this.sc.target.timeoutMs;
+    const hardSignal = this.hardAbort.signal;
+    if (step.kind === "grpc") {
+      const client = this.grpc.get(this.base, this.sc.target.ca);
+      return runGrpcStep(step, it.ctx, { client, timeoutMs, targetHeaders: headers, hardSignal });
+    }
+    this.wsAgent ??= new Agent({
+      connections: null,
+      connect: instrumentedConnector({ timeoutMs, http2: false, ca: this.sc.target.ca }, (t) =>
+        this.onConnection(t),
+      ),
+    });
+    return runWsStep(step, it.ctx, {
+      base: this.base,
+      basePath: this.basePath,
+      targetHeaders: headers,
+      timeoutMs,
+      dispatcher: this.wsAgent,
+      hardSignal,
+      sleep: (ms) => this.sleepUntil(performance.now() + ms),
+      onConnect: (ms) => !warmup && recordMs(this.ws.connect, ms),
+      onRtt: (ms) => !warmup && recordMs(this.ws.rtt, ms),
+    });
+  }
+
   /** Falha antes de enviar (ex.: template inválido em tempo de execução): conta como requisição com erro. */
   private recordUnsent(m: StepMetrics, warmup: boolean, message: string): void {
     const b = this.bucket(this.rel());
@@ -506,51 +576,73 @@ export class Engine {
     for (let i = 0; i < it.flow.steps.length; i++) {
       if (i > 0 && (this.stopping || this.hardAbort.signal.aborted)) return;
       const step = it.flow.steps[i]!;
-      let req: BuiltRequest;
-      try {
-        req = buildRequest(this.sc, step, it.ctx, this.basePath, this.base.host);
-      } catch (e) {
-        this.recordUnsent(metrics[i]!, warmup, templateErrorMessage(e));
-        return;
+      let req: BuiltRequest | undefined;
+      if (step.kind === "http") {
+        try {
+          req = buildRequest(this.sc, step, it.ctx, this.basePath, this.base.host);
+        } catch (e) {
+          this.recordUnsent(metrics[i]!, warmup, templateErrorMessage(e));
+          return;
+        }
       }
       if (closed) {
         await this.takeToken();
         if (this.stopping && i > 0) return;
       }
       const sentAt = performance.now();
-      const out = await this.send(req, step.needsBody);
+      let out: ProtocolOutcome;
+      try {
+        out = req
+          ? await this.sendHttp(step, req, intended, it)
+          : await this.sendOther(step, it, warmup);
+      } catch (e) {
+        // erro de template dentro do roteiro WS / mensagem gRPC
+        this.recordUnsent(metrics[i]!, warmup, templateErrorMessage(e));
+        return;
+      }
       const end = performance.now();
       const latency = end - intended;
       if (out.error === "aborted") {
         this.counters.aborted++;
         return;
       }
-      const ev: Evaluation = out.res
-        ? evaluateResponse(step, out.res, latency, it.ctx)
-        : { checks: [], error: out.error, message: out.message };
+      // WS/gRPC: o tempo máximo vale para a etapa inteira (no HTTP, evaluateResponse já checou)
+      const maxMs = step.kind === "http" ? undefined : step.expect.maxDurationMs;
+      if (maxMs !== undefined && !out.error) {
+        const ok = latency <= maxMs;
+        out.checks.push({ label: `tempo ≤ ${maxMs}ms`, ok });
+        if (!ok) {
+          out.error = "check_failed";
+          out.message = `tempo ${latency.toFixed(0)}ms > ${maxMs}ms`;
+        }
+      }
 
       const b = this.bucket(end - this.startPerf);
       b.requests++;
-      if (ev.error) b.errors++;
+      if (out.error) b.errors++;
       recordMs(b.latency, latency);
 
       if (!warmup) {
         const m = metrics[i]!;
-        const status = out.res?.status;
         m.requests++;
         m.bytesIn += out.bytesIn;
-        m.bytesOut += req.bytesOut;
+        m.bytesOut += out.bytesOut;
         recordMs(m.latency, latency);
-        if (status) m.statusCodes[status] = (m.statusCodes[status] ?? 0) + 1;
-        if (ev.error) m.addError(ev.error, ev.message);
-        for (const c of ev.checks) m.addCheck(c.label, c.ok);
+        if (out.statusKey) m.statusCodes[out.statusKey] = (m.statusCodes[out.statusKey] ?? 0) + 1;
+        if (out.error) m.addError(out.error, out.message);
+        for (const c of out.checks) m.addCheck(c.label, c.ok);
         recordMs(this.serviceTime, end - sentAt);
-        if (out.headersAt !== undefined) {
-          recordMs(this.ttfb, out.headersAt - sentAt);
-          recordMs(this.download, end - out.headersAt);
+        if (out.firstByteAt !== undefined) {
+          recordMs(this.ttfb, out.firstByteAt - sentAt);
+          recordMs(this.download, end - out.firstByteAt);
+        }
+        if (step.kind === "ws") {
+          this.ws.sessions++;
+          this.ws.sent += out.messagesSent ?? 0;
+          this.ws.received += out.messagesReceived ?? 0;
         }
       }
-      if (ev.error) return; // etapas seguintes dependem desta
+      if (out.error) return; // etapas seguintes dependem desta
       const think = thinkTimeMs(step, it.ctx);
       if (think > 0) {
         await this.sleepUntil(performance.now() + think);
@@ -594,6 +686,17 @@ export class Engine {
       cpuMicros: threadCpu() - this.cpuStart,
       stopAtRelMs: this.stopAtRel,
       maxVus,
+      ...(this.ws.sessions || this.ws.connect.totalCount
+        ? {
+            ws: {
+              sessions: this.ws.sessions,
+              messagesSent: this.ws.sent,
+              messagesReceived: this.ws.received,
+              connect: encodeHistogram(this.ws.connect),
+              rtt: encodeHistogram(this.ws.rtt),
+            },
+          }
+        : {}),
     };
   }
 }

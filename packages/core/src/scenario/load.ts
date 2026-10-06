@@ -10,7 +10,8 @@ import { parseThreshold } from "../thresholds.js";
 import { csvToTable } from "./csv.js";
 import { parseJsonPath } from "./jsonpath.js";
 import { parseMatcher } from "./matchers.js";
-import { scenarioSchema } from "./schema.js";
+import { GRPC_CODES, scenarioSchema } from "./schema.js";
+import * as protoLoader from "@grpc/proto-loader";
 import {
   BUILTIN_VARS,
   compileJson,
@@ -30,6 +31,9 @@ import type {
   Scenario,
   Step,
   VuStage,
+  WsAction,
+  WsSpec,
+  GrpcSpec,
 } from "./types.js";
 
 export interface ScenarioIssue {
@@ -119,9 +123,18 @@ function schemaIssues(errors: ErrorObject[], raw: unknown, loc: Locator): void {
   const typeErrorPaths = new Set(
     errors.filter((e) => e.keyword === "type").map((e) => e.instancePath),
   );
+  // anyOf: os ramos geram erros próprios; mostra só uma mensagem para o campo
+  const anyOfPaths = errors.filter((e) => e.keyword === "anyOf").map((e) => e.instancePath);
   for (const e of errors) {
     if (e.keyword === "propertyNames") continue; // o erro do pattern interno já descreve
-    if (e.keyword !== "type" && typeErrorPaths.has(e.instancePath)) continue;
+    if (
+      e.keyword !== "anyOf" &&
+      anyOfPaths.some((p) => e.instancePath === p || e.instancePath.startsWith(`${p}/`))
+    ) {
+      continue;
+    }
+    if (e.keyword !== "type" && e.keyword !== "anyOf" && typeErrorPaths.has(e.instancePath))
+      continue;
     const base = toPath(e.instancePath, raw);
     const params = e.params as Record<string, unknown>;
     const parent = (e.parentSchema ?? {}) as Record<string, unknown>;
@@ -170,6 +183,13 @@ function schemaIssues(errors: ErrorObject[], raw: unknown, loc: Locator): void {
       case "maximum":
       case "exclusiveMinimum":
         loc.fail(base, `deve ser ${params.comparison} ${params.limit}`);
+        break;
+      case "anyOf":
+        loc.fail(
+          base,
+          (parent["x-erro"] as string) ??
+            `valor inválido (${(parent.description as string) ?? "formato não reconhecido"})`,
+        );
         break;
       case "minItems":
         loc.fail(base, `informe ao menos ${params.limit} item(ns)`);
@@ -430,82 +450,16 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
   });
 
   // fluxos
-  const compileStep = (s: Obj, p: Path, scope: Set<string>, later: Map<string, number>): Step => {
-    const rq = s.request as Obj;
-    const rp: Path = [...p, "request"];
-    const method = String(rq.method ?? "GET").toUpperCase() as HttpMethod;
-    const query: [string, Template][] = [];
-    for (const [k, v] of Object.entries((rq.query as Obj) ?? {})) {
-      for (const [i, item] of (Array.isArray(v) ? v : [v]).entries()) {
-        query.push([
-          k,
-          tpl(item, Array.isArray(v) ? [...rp, "query", k, i] : [...rp, "query", k], scope, later),
-        ]);
-      }
-    }
-
-    const kinds = ["json", "body", "form", "file", "multipart"].filter((k) => rq[k] !== undefined);
-    if (kinds.length > 1) loc.fail(rp, `use apenas um corpo (encontrados: ${kinds.join(", ")})`);
-    let body: BodySpec | undefined;
-    const ctype = rq.contentType as string | undefined;
-    if (rq.json !== undefined) {
-      const value = compileJson(rq.json, copts, (tt, jp) =>
-        checkRefs(tt, [...rp, "json", ...jp], scope, later),
-      );
-      body = { kind: "json", value, contentType: ctype ?? "application/json" };
-    } else if (rq.body !== undefined) {
-      body = {
-        kind: "text",
-        template: tpl(rq.body, [...rp, "body"], scope, later),
-        contentType: ctype,
-      };
-    } else if (rq.form !== undefined) {
-      body = {
-        kind: "form",
-        fields: tplEntries(rq.form, [...rp, "form"], scope, later),
-        contentType: ctype ?? "application/x-www-form-urlencoded",
-      };
-    } else if (rq.file !== undefined) {
-      const data = readFile(rq.file as string, [...rp, "file"]);
-      if (data)
-        body = {
-          kind: "file",
-          data,
-          source: rq.file as string,
-          contentType: ctype ?? guessType(rq.file as string),
-        };
-    } else if (rq.multipart !== undefined) {
-      const parts: Extract<BodySpec, { kind: "multipart" }>["parts"] = [];
-      for (const [name, v] of Object.entries(rq.multipart as Obj)) {
-        if (v && typeof v === "object") {
-          const f = v as { file: string; contentType?: string; filename?: string };
-          const data = readFile(f.file, [...rp, "multipart", name, "file"]);
-          if (data) {
-            parts.push({
-              name,
-              file: data,
-              filename: f.filename ?? path.basename(f.file),
-              contentType: f.contentType ?? guessType(f.file),
-            });
-          }
-        } else parts.push({ name, value: tpl(v, [...rp, "multipart", name], scope, later) });
-      }
-      body = { kind: "multipart", parts };
-    }
-
-    const request: RequestSpec = {
-      method,
-      path: tpl(rq.path, [...rp, "path"], scope, later),
-      headers: tplEntries(rq.headers, [...rp, "headers"], scope, later),
-      query,
-      body,
-    };
-
-    const e = (s.expect as Obj) ?? {};
-    const ep: Path = [...p, "expect"];
+  const compileExpect = (e: Obj, ep: Path): ExpectSpec => {
     const expect: ExpectSpec = {
       status:
         e.status === undefined ? undefined : ([] as number[]).concat(e.status as number | number[]),
+      grpcStatus:
+        e.grpcStatus === undefined
+          ? undefined
+          : ([] as (number | string)[])
+              .concat(e.grpcStatus as number | string)
+              .map((c) => (typeof c === "number" ? c : GRPC_CODES.indexOf(c))),
       maxDurationMs:
         e.maxDuration !== undefined ? parseDuration(e.maxDuration as string) : undefined,
       jsonPath: [],
@@ -534,10 +488,13 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
         loc.fail([...ep, "bodyMatches"], `regex inválida: ${(err as Error).message}`);
       }
     }
+    return expect;
+  };
 
+  const compileExtract = (x: Obj | undefined, xpBase: Path): [string, Extractor][] => {
     const extract: [string, Extractor][] = [];
-    for (const [name, spec] of Object.entries((s.extract as Obj) ?? {})) {
-      const xp: Path = [...p, "extract", name];
+    for (const [name, spec] of Object.entries(x ?? {})) {
+      const xp: Path = [...xpBase, name];
       try {
         if (typeof spec === "string") {
           extract.push([name, { kind: "jsonPath", path: spec, segments: parseJsonPath(spec) }]);
@@ -571,7 +528,216 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
         loc.fail(xp, (err as Error).message);
       }
     }
+    return extract;
+  };
 
+  const compileHttp = (
+    rq: Obj,
+    rp: Path,
+    scope: Set<string>,
+    later: Map<string, number>,
+  ): RequestSpec => {
+    const method = String(rq.method ?? "GET").toUpperCase() as HttpMethod;
+    const query: [string, Template][] = [];
+    for (const [k, v] of Object.entries((rq.query as Obj) ?? {})) {
+      for (const [i, item] of (Array.isArray(v) ? v : [v]).entries()) {
+        query.push([
+          k,
+          tpl(item, Array.isArray(v) ? [...rp, "query", k, i] : [...rp, "query", k], scope, later),
+        ]);
+      }
+    }
+    const kinds = ["json", "body", "form", "file", "multipart"].filter((k) => rq[k] !== undefined);
+    if (kinds.length > 1) loc.fail(rp, `use apenas um corpo (encontrados: ${kinds.join(", ")})`);
+    let body: BodySpec | undefined;
+    const ctype = rq.contentType as string | undefined;
+    if (rq.json !== undefined) {
+      const value = compileJson(rq.json, copts, (tt, jp) =>
+        checkRefs(tt, [...rp, "json", ...jp], scope, later),
+      );
+      body = { kind: "json", value, contentType: ctype ?? "application/json" };
+    } else if (rq.body !== undefined) {
+      body = {
+        kind: "text",
+        template: tpl(rq.body, [...rp, "body"], scope, later),
+        contentType: ctype,
+      };
+    } else if (rq.form !== undefined) {
+      body = {
+        kind: "form",
+        fields: tplEntries(rq.form, [...rp, "form"], scope, later),
+        contentType: ctype ?? "application/x-www-form-urlencoded",
+      };
+    } else if (rq.file !== undefined) {
+      const data = readFile(rq.file as string, [...rp, "file"]);
+      if (data) {
+        body = {
+          kind: "file",
+          data,
+          source: rq.file as string,
+          contentType: ctype ?? guessType(rq.file as string),
+        };
+      }
+    } else if (rq.multipart !== undefined) {
+      const parts: Extract<BodySpec, { kind: "multipart" }>["parts"] = [];
+      for (const [name, v] of Object.entries(rq.multipart as Obj)) {
+        if (v && typeof v === "object") {
+          const f = v as { file: string; contentType?: string; filename?: string };
+          const data = readFile(f.file, [...rp, "multipart", name, "file"]);
+          if (data) {
+            parts.push({
+              name,
+              file: data,
+              filename: f.filename ?? path.basename(f.file),
+              contentType: f.contentType ?? guessType(f.file),
+            });
+          }
+        } else parts.push({ name, value: tpl(v, [...rp, "multipart", name], scope, later) });
+      }
+      body = { kind: "multipart", parts };
+    }
+    return {
+      method,
+      path: tpl(rq.path, [...rp, "path"], scope, later),
+      headers: tplEntries(rq.headers, [...rp, "headers"], scope, later),
+      query,
+      body,
+    };
+  };
+
+  const compileWs = (w: Obj, wp: Path, scope: Set<string>, later: Map<string, number>): WsSpec => {
+    const local = new Set(scope); // extrações do roteiro valem para as ações seguintes
+    const script: WsAction[] = [];
+    let expects = 0;
+    ((w.script as Obj[] | undefined) ?? []).forEach((a, i) => {
+      const ap: Path = [...wp, "script", i];
+      const kinds = ["send", "sendJson", "expect", "sleep"].filter((k) => a[k] !== undefined);
+      if (kinds.length !== 1) {
+        loc.fail(ap, "cada ação precisa de exatamente um entre send, sendJson, expect e sleep");
+        return;
+      }
+      if (a.extract !== undefined && a.expect === undefined) {
+        loc.fail(
+          [...ap, "extract"],
+          "extract só vale junto de expect (extrai da mensagem recebida)",
+        );
+      }
+      if (a.send !== undefined)
+        script.push({ kind: "send", text: tpl(a.send, [...ap, "send"], local, later) });
+      else if (a.sendJson !== undefined) {
+        script.push({
+          kind: "send",
+          json: compileJson(a.sendJson, copts, (tt, jp) =>
+            checkRefs(tt, [...ap, "sendJson", ...jp], local, later),
+          ),
+        });
+      } else if (a.sleep !== undefined)
+        script.push({ kind: "sleep", ms: parseDuration(a.sleep as string) });
+      else {
+        const e = a.expect as Obj;
+        const extract = compileExtract(a.extract as Obj | undefined, [...ap, "extract"]);
+        for (const [k, x] of extract) {
+          if (x.kind === "header")
+            loc.fail([...ap, "extract", k], "mensagens WebSocket não têm headers");
+          local.add(k);
+        }
+        script.push({
+          kind: "expect",
+          timeoutMs:
+            e.timeout !== undefined ? parseDuration(e.timeout as string) : target.timeoutMs,
+          expect: compileExpect(e, [...ap, "expect"]),
+          extract,
+          index: ++expects,
+        });
+      }
+    });
+    if (!script.length) loc.fail(wp, "informe um script com ao menos uma ação (send/expect/sleep)");
+    return {
+      path: tpl(w.path, [...wp, "path"], scope, later),
+      headers: tplEntries(w.headers, [...wp, "headers"], scope, later),
+      subprotocols: (w.subprotocols as string[] | undefined) ?? [],
+      script,
+    };
+  };
+
+  const compileGrpc = (
+    g: Obj,
+    gp: Path,
+    scope: Set<string>,
+    later: Map<string, number>,
+  ): GrpcSpec | undefined => {
+    const protoFile = path.resolve(baseDir, g.proto as string);
+    let def: protoLoader.PackageDefinition;
+    try {
+      def = protoLoader.loadSync(protoFile, {
+        keepCase: true,
+        longs: String,
+        enums: String,
+        defaults: true,
+        oneofs: true,
+      });
+    } catch (e) {
+      loc.fail(
+        [...gp, "proto"],
+        `não foi possível carregar "${g.proto}": ${(e as Error).message.split("\n")[0]}`,
+      );
+      return undefined;
+    }
+    const services = Object.entries(def).filter(([, v]) =>
+      Object.values(v as object).some((m) => m && typeof m === "object" && "path" in (m as object)),
+    );
+    const svc = services.find(([k]) => k === g.service)?.[1] as
+      Record<string, protoLoader.MethodDefinition<unknown, unknown>> | undefined;
+    if (!svc) {
+      loc.fail(
+        [...gp, "service"],
+        `serviço "${g.service}" não existe no .proto (disponíveis: ${services.map(([k]) => k).join(", ") || "nenhum"})`,
+      );
+      return undefined;
+    }
+    const m = svc[g.method as string];
+    if (!m) {
+      loc.fail(
+        [...gp, "method"],
+        `método "${g.method}" não existe em ${g.service} (disponíveis: ${Object.keys(svc).join(", ")})`,
+      );
+      return undefined;
+    }
+    if (m.requestStream || m.responseStream) {
+      loc.fail(
+        [...gp, "method"],
+        "métodos com streaming ainda não são suportados; use chamadas unárias",
+      );
+      return undefined;
+    }
+    return {
+      protoFile,
+      service: g.service as string,
+      method: g.method as string,
+      path: m.path,
+      message: compileJson(g.message ?? {}, copts, (tt, jp) =>
+        checkRefs(tt, [...gp, "message", ...jp], scope, later),
+      ),
+      metadata: tplEntries(g.metadata, [...gp, "metadata"], scope, later),
+      requestSerialize: m.requestSerialize as (v: unknown) => Buffer,
+      responseSerialize: m.responseSerialize as (v: unknown) => Buffer,
+      responseDeserialize: m.responseDeserialize as (b: Buffer) => unknown,
+    };
+  };
+
+  const compileStep = (s: Obj, p: Path, scope: Set<string>, later: Map<string, number>): Step => {
+    const kinds = (["request", "ws", "grpc"] as const).filter((k) => s[k] !== undefined);
+    if (kinds.length !== 1) {
+      loc.fail(
+        p,
+        "cada etapa precisa de exatamente um entre request (HTTP), ws (WebSocket) e grpc",
+      );
+    }
+    const kind = kinds[0] === "ws" ? "ws" : kinds[0] === "grpc" ? "grpc" : "http";
+    const e = (s.expect as Obj) ?? {};
+    const ep: Path = [...p, "expect"];
+    const expect = compileExpect(e, ep);
+    const extract = compileExtract(s.extract as Obj | undefined, [...p, "extract"]);
     let think = { minMs: 0, maxMs: 0 };
     if (s.think !== undefined) {
       const [a, b] = (s.think as string).split("..").map((x) => parseDuration(x.trim()));
@@ -579,10 +745,63 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
       if (think.maxMs < think.minMs)
         loc.fail([...p, "think"], "intervalo invertido (use menor..maior)");
     }
+    if (kind !== "grpc" && e.grpcStatus !== undefined)
+      loc.fail([...ep, "grpcStatus"], "grpcStatus só vale em etapas grpc");
 
+    if (kind === "ws") {
+      const w = s.ws as Obj;
+      for (const k of Object.keys(e).filter((k) => k !== "maxDuration")) {
+        loc.fail([...ep, k], "em etapas ws, as checagens ficam em script[].expect (por mensagem)");
+      }
+      if (s.extract !== undefined)
+        loc.fail([...p, "extract"], "em etapas ws, use extract dentro do script (junto do expect)");
+      const ws = compileWs(w, [...p, "ws"], scope, later);
+      return {
+        name: (s.name as string | undefined) ?? `WS ${w.path as string}`,
+        kind,
+        method: "WS",
+        path: w.path as string,
+        label: `WS ${w.path as string}`,
+        ws,
+        expect,
+        extract: [],
+        think,
+        needsBody: false,
+      };
+    }
+    if (kind === "grpc") {
+      const g = s.grpc as Obj;
+      if (e.status !== undefined)
+        loc.fail([...ep, "status"], "em etapas grpc use grpcStatus (OK, NOT_FOUND…)");
+      if (e.headers !== undefined)
+        loc.fail([...ep, "headers"], "checagem de headers não se aplica a gRPC");
+      for (const [k, x] of extract) {
+        if (x.kind === "header")
+          loc.fail([...p, "extract", k], "extração por header não se aplica a gRPC");
+      }
+      const grpc = compileGrpc(g, [...p, "grpc"], scope, later);
+      const label = `${g.service as string}/${g.method as string}`;
+      return {
+        name: (s.name as string | undefined) ?? `GRPC ${label}`,
+        kind,
+        method: "GRPC",
+        path: label,
+        label: `GRPC ${label}`,
+        grpc,
+        expect,
+        extract,
+        think,
+        needsBody: true,
+      };
+    }
+    const rq = (s.request as Obj) ?? { path: "/" };
+    const request = compileHttp(rq, [...p, "request"], scope, later);
     return {
-      name: (s.name as string | undefined) ?? `${method} ${rq.path as string}`,
-      label: `${method} ${rq.path as string}`,
+      name: (s.name as string | undefined) ?? `${request.method} ${rq.path as string}`,
+      kind: "http",
+      method: request.method,
+      path: rq.path as string,
+      label: `${request.method} ${rq.path as string}`,
       request,
       expect,
       extract,
@@ -595,11 +814,19 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     };
   };
 
+  /** Variáveis que uma etapa extrai (inclui as do roteiro WebSocket). */
+  const extractNames = (s: Obj): string[] => [
+    ...Object.keys((s.extract as Obj) ?? {}),
+    ...(((s.ws as Obj | undefined)?.script as Obj[] | undefined) ?? []).flatMap((a) =>
+      Object.keys((a.extract as Obj) ?? {}),
+    ),
+  ];
+
   const compileFlow = (steps: Obj[], p: Path): Step[] => {
     const scope = new Set(varScope);
     const later = new Map<string, number>();
     steps.forEach((s, i) => {
-      for (const k of Object.keys((s.extract as Obj) ?? {})) if (!later.has(k)) later.set(k, i);
+      for (const k of extractNames(s)) if (!later.has(k)) later.set(k, i);
     });
     return steps.map((s, i) => {
       for (const [k, idx] of later) if (idx < i) scope.add(k);

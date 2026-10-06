@@ -204,6 +204,11 @@ export function runMarkdown(
     `| latência p50 / p95 / p99 | ${fmtNum(l.p50)} / ${fmtNum(l.p95)} / ${fmtNum(l.p99)} ms |`,
   );
   out.push(`| latência p99.9 / máx | ${fmtNum(l.p999)} / ${fmtNum(l.max)} ms |`);
+  if (s.ws) {
+    out.push(
+      `| WebSocket | ${s.ws.sessions.toLocaleString("pt-BR")} sessões · handshake p99 ${fmtNum(s.ws.connectMs.p99)} ms · RTT p50 / p99 ${fmtNum(s.ws.rttMs.p50)} / ${fmtNum(s.ws.rttMs.p99)} ms |`,
+    );
+  }
   out.push("");
   if (r.thresholds.length) {
     out.push("**Thresholds**", "", "| | threshold | medido |", "|---|---|--:|");

@@ -69,13 +69,121 @@ const request = {
   },
 };
 
+const jsonPathChecks = {
+  type: "object",
+  additionalProperties: matcher,
+  propertyNames: { pattern: "^\\$", "x-erro": 'JSONPath deve começar com "$"' },
+};
+
+const extractSchema = {
+  type: "object",
+  propertyNames: varName,
+  additionalProperties: {
+    type: ["string", "object"],
+    pattern: "^\\$",
+    "x-erro": 'use um JSONPath ("$.id") ou { jsonPath | regex | header }',
+    additionalProperties: false,
+    properties: {
+      jsonPath: { type: "string", pattern: "^\\$", "x-erro": 'JSONPath deve começar com "$"' },
+      regex: { type: "string" },
+      group: { type: "integer", minimum: 0 },
+      header: { type: "string" },
+      default: {},
+    },
+  },
+};
+
+const GRPC_CODES = [
+  "OK",
+  "CANCELLED",
+  "UNKNOWN",
+  "INVALID_ARGUMENT",
+  "DEADLINE_EXCEEDED",
+  "NOT_FOUND",
+  "ALREADY_EXISTS",
+  "PERMISSION_DENIED",
+  "RESOURCE_EXHAUSTED",
+  "FAILED_PRECONDITION",
+  "ABORTED",
+  "OUT_OF_RANGE",
+  "UNIMPLEMENTED",
+  "INTERNAL",
+  "UNAVAILABLE",
+  "DATA_LOSS",
+  "UNAUTHENTICATED",
+];
+export { GRPC_CODES };
+const grpcCode = {
+  anyOf: [
+    { type: "integer", minimum: 0, maximum: 16 },
+    { type: "string", enum: GRPC_CODES },
+  ],
+};
+
+const ws = {
+  type: "object",
+  additionalProperties: false,
+  required: ["path"],
+  description:
+    "Etapa WebSocket: conecta em target.baseUrl (http→ws, https→wss) + path e roda o roteiro",
+  properties: {
+    path: {
+      type: "string",
+      pattern: "^/",
+      "x-erro": 'deve começar com "/" (relativo a target.baseUrl)',
+    },
+    headers: templMap,
+    subprotocols: { type: "array", items: { type: "string" } },
+    script: {
+      type: "array",
+      description: "Ações em ordem: send | sendJson | expect (+ extract) | sleep",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          send: { ...scalar, description: "Mensagem de texto (templates)" },
+          sendJson: { description: "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)" },
+          expect: {
+            type: "object",
+            additionalProperties: false,
+            description: "Espera a PRÓXIMA mensagem e a checa",
+            properties: {
+              jsonPath: jsonPathChecks,
+              bodyContains: { type: ["string", "array"], items: { type: "string" } },
+              bodyMatches: { type: "string" },
+              timeout: duration,
+            },
+          },
+          extract: extractSchema,
+          sleep: duration,
+        },
+      },
+    },
+  },
+};
+
+const grpc = {
+  type: "object",
+  additionalProperties: false,
+  required: ["proto", "service", "method"],
+  description: "Chamada gRPC unária para target.baseUrl (http = sem TLS, https = TLS)",
+  properties: {
+    proto: { type: "string", description: "Arquivo .proto (relativo ao cenário)" },
+    service: { type: "string", description: "Serviço com pacote, ex.: demo.Greeter" },
+    method: { type: "string" },
+    message: { description: "Mensagem da requisição em JSON (templates)" },
+    metadata: templMap,
+  },
+};
+
 const step = {
   type: "object",
   additionalProperties: false,
-  required: ["request"],
   properties: {
     name: { type: "string" },
     request,
+    ws,
+    grpc,
     expect: {
       type: "object",
       additionalProperties: false,
@@ -87,34 +195,18 @@ const step = {
           minItems: 1,
           items: { type: "integer", minimum: 100, maximum: 599 },
         },
-        maxDuration: duration,
-        jsonPath: {
-          type: "object",
-          additionalProperties: matcher,
-          propertyNames: { pattern: "^\\$", "x-erro": 'JSONPath deve começar com "$"' },
+        grpcStatus: {
+          description: 'gRPC: código(s) aceito(s), ex.: OK, "NOT_FOUND" ou [0, 5] (padrão: OK)',
+          anyOf: [grpcCode, { type: "array", minItems: 1, items: grpcCode }],
         },
+        maxDuration: duration,
+        jsonPath: jsonPathChecks,
         headers: { type: "object", additionalProperties: matcher },
         bodyContains: { type: ["string", "array"], items: { type: "string" } },
         bodyMatches: { type: "string" },
       },
     },
-    extract: {
-      type: "object",
-      propertyNames: varName,
-      additionalProperties: {
-        type: ["string", "object"],
-        pattern: "^\\$",
-        "x-erro": 'use um JSONPath ("$.id") ou { jsonPath | regex | header }',
-        additionalProperties: false,
-        properties: {
-          jsonPath: { type: "string", pattern: "^\\$", "x-erro": 'JSONPath deve começar com "$"' },
-          regex: { type: "string" },
-          group: { type: "integer", minimum: 0 },
-          header: { type: "string" },
-          default: {},
-        },
-      },
-    },
+    extract: extractSchema,
     think: {
       type: "string",
       pattern:

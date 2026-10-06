@@ -129,7 +129,8 @@ export function registerScenarioCommands(program: Command): void {
               console.log(`    ${c.cyan(p.method)} ${p.url}  ${c.dim(`(${p.step})`)}`);
               for (const [k, v] of Object.entries(p.headers))
                 console.log(c.dim(`      ${k}: ${v}`));
-              if (p.body !== undefined) console.log(c.dim(`      corpo: ${p.body}`));
+              if (p.body !== undefined)
+                console.log(c.dim(`      corpo: ${p.body.replace(/\n/g, "\n             ")}`));
             }
             console.log(
               c.dim("\n  <nome> = valor que só existe após a resposta da etapa anterior (extract)"),

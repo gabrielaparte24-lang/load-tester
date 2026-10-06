@@ -211,7 +211,6 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["request"],
         "properties": {
           "name": {
             "type": "string"
@@ -304,6 +303,144 @@
               }
             }
           },
+          "ws": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "description": "Etapa WebSocket: conecta em target.baseUrl (http→ws, https→wss) + path e roda o roteiro",
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^/",
+                "x-erro": "deve começar com \"/\" (relativo a target.baseUrl)"
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": ["string", "number", "boolean"]
+                }
+              },
+              "subprotocols": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "script": {
+                "type": "array",
+                "description": "Ações em ordem: send | sendJson | expect (+ extract) | sleep",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "send": {
+                      "type": ["string", "number", "boolean"],
+                      "description": "Mensagem de texto (templates)"
+                    },
+                    "sendJson": {
+                      "description": "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)"
+                    },
+                    "expect": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Espera a PRÓXIMA mensagem e a checa",
+                      "properties": {
+                        "jsonPath": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": ["string", "number", "boolean", "null"],
+                            "description": "200, true, \"texto\", \">0\", \">= 5\", \"== ok\", \"!= x\", \"~regex\", \"exists\", \"!exists\""
+                          },
+                          "propertyNames": {
+                            "pattern": "^\\$",
+                            "x-erro": "JSONPath deve começar com \"$\""
+                          }
+                        },
+                        "bodyContains": {
+                          "type": ["string", "array"],
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "bodyMatches": {
+                          "type": "string"
+                        },
+                        "timeout": {
+                          "type": "string",
+                          "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                          "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                        }
+                      }
+                    },
+                    "extract": {
+                      "type": "object",
+                      "propertyNames": {
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                        "x-erro": "nome inválido: use letras, números e _ (começando por letra ou _)"
+                      },
+                      "additionalProperties": {
+                        "type": ["string", "object"],
+                        "pattern": "^\\$",
+                        "x-erro": "use um JSONPath (\"$.id\") ou { jsonPath | regex | header }",
+                        "additionalProperties": false,
+                        "properties": {
+                          "jsonPath": {
+                            "type": "string",
+                            "pattern": "^\\$",
+                            "x-erro": "JSONPath deve começar com \"$\""
+                          },
+                          "regex": {
+                            "type": "string"
+                          },
+                          "group": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "header": {
+                            "type": "string"
+                          },
+                          "default": {}
+                        }
+                      }
+                    },
+                    "sleep": {
+                      "type": "string",
+                      "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                      "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "grpc": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["proto", "service", "method"],
+            "description": "Chamada gRPC unária para target.baseUrl (http = sem TLS, https = TLS)",
+            "properties": {
+              "proto": {
+                "type": "string",
+                "description": "Arquivo .proto (relativo ao cenário)"
+              },
+              "service": {
+                "type": "string",
+                "description": "Serviço com pacote, ex.: demo.Greeter"
+              },
+              "method": {
+                "type": "string"
+              },
+              "message": {
+                "description": "Mensagem da requisição em JSON (templates)"
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": ["string", "number", "boolean"]
+                }
+              }
+            }
+          },
           "expect": {
             "type": "object",
             "additionalProperties": false,
@@ -318,6 +455,77 @@
                   "minimum": 100,
                   "maximum": 599
                 }
+              },
+              "grpcStatus": {
+                "description": "gRPC: código(s) aceito(s), ex.: OK, \"NOT_FOUND\" ou [0, 5] (padrão: OK)",
+                "anyOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 16
+                      },
+                      {
+                        "type": "string",
+                        "enum": [
+                          "OK",
+                          "CANCELLED",
+                          "UNKNOWN",
+                          "INVALID_ARGUMENT",
+                          "DEADLINE_EXCEEDED",
+                          "NOT_FOUND",
+                          "ALREADY_EXISTS",
+                          "PERMISSION_DENIED",
+                          "RESOURCE_EXHAUSTED",
+                          "FAILED_PRECONDITION",
+                          "ABORTED",
+                          "OUT_OF_RANGE",
+                          "UNIMPLEMENTED",
+                          "INTERNAL",
+                          "UNAVAILABLE",
+                          "DATA_LOSS",
+                          "UNAUTHENTICATED"
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "OK",
+                            "CANCELLED",
+                            "UNKNOWN",
+                            "INVALID_ARGUMENT",
+                            "DEADLINE_EXCEEDED",
+                            "NOT_FOUND",
+                            "ALREADY_EXISTS",
+                            "PERMISSION_DENIED",
+                            "RESOURCE_EXHAUSTED",
+                            "FAILED_PRECONDITION",
+                            "ABORTED",
+                            "OUT_OF_RANGE",
+                            "UNIMPLEMENTED",
+                            "INTERNAL",
+                            "UNAVAILABLE",
+                            "DATA_LOSS",
+                            "UNAUTHENTICATED"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ]
               },
               "maxDuration": {
                 "type": "string",
@@ -413,7 +621,6 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["request"],
               "properties": {
                 "name": {
                   "type": "string"
@@ -506,6 +713,144 @@
                     }
                   }
                 },
+                "ws": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path"],
+                  "description": "Etapa WebSocket: conecta em target.baseUrl (http→ws, https→wss) + path e roda o roteiro",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "pattern": "^/",
+                      "x-erro": "deve começar com \"/\" (relativo a target.baseUrl)"
+                    },
+                    "headers": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": ["string", "number", "boolean"]
+                      }
+                    },
+                    "subprotocols": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "script": {
+                      "type": "array",
+                      "description": "Ações em ordem: send | sendJson | expect (+ extract) | sleep",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "send": {
+                            "type": ["string", "number", "boolean"],
+                            "description": "Mensagem de texto (templates)"
+                          },
+                          "sendJson": {
+                            "description": "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)"
+                          },
+                          "expect": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "description": "Espera a PRÓXIMA mensagem e a checa",
+                            "properties": {
+                              "jsonPath": {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "type": ["string", "number", "boolean", "null"],
+                                  "description": "200, true, \"texto\", \">0\", \">= 5\", \"== ok\", \"!= x\", \"~regex\", \"exists\", \"!exists\""
+                                },
+                                "propertyNames": {
+                                  "pattern": "^\\$",
+                                  "x-erro": "JSONPath deve começar com \"$\""
+                                }
+                              },
+                              "bodyContains": {
+                                "type": ["string", "array"],
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "bodyMatches": {
+                                "type": "string"
+                              },
+                              "timeout": {
+                                "type": "string",
+                                "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                                "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                              }
+                            }
+                          },
+                          "extract": {
+                            "type": "object",
+                            "propertyNames": {
+                              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                              "x-erro": "nome inválido: use letras, números e _ (começando por letra ou _)"
+                            },
+                            "additionalProperties": {
+                              "type": ["string", "object"],
+                              "pattern": "^\\$",
+                              "x-erro": "use um JSONPath (\"$.id\") ou { jsonPath | regex | header }",
+                              "additionalProperties": false,
+                              "properties": {
+                                "jsonPath": {
+                                  "type": "string",
+                                  "pattern": "^\\$",
+                                  "x-erro": "JSONPath deve começar com \"$\""
+                                },
+                                "regex": {
+                                  "type": "string"
+                                },
+                                "group": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "header": {
+                                  "type": "string"
+                                },
+                                "default": {}
+                              }
+                            }
+                          },
+                          "sleep": {
+                            "type": "string",
+                            "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
+                            "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "grpc": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["proto", "service", "method"],
+                  "description": "Chamada gRPC unária para target.baseUrl (http = sem TLS, https = TLS)",
+                  "properties": {
+                    "proto": {
+                      "type": "string",
+                      "description": "Arquivo .proto (relativo ao cenário)"
+                    },
+                    "service": {
+                      "type": "string",
+                      "description": "Serviço com pacote, ex.: demo.Greeter"
+                    },
+                    "method": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "description": "Mensagem da requisição em JSON (templates)"
+                    },
+                    "metadata": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": ["string", "number", "boolean"]
+                      }
+                    }
+                  }
+                },
                 "expect": {
                   "type": "object",
                   "additionalProperties": false,
@@ -520,6 +865,77 @@
                         "minimum": 100,
                         "maximum": 599
                       }
+                    },
+                    "grpcStatus": {
+                      "description": "gRPC: código(s) aceito(s), ex.: OK, \"NOT_FOUND\" ou [0, 5] (padrão: OK)",
+                      "anyOf": [
+                        {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 16
+                            },
+                            {
+                              "type": "string",
+                              "enum": [
+                                "OK",
+                                "CANCELLED",
+                                "UNKNOWN",
+                                "INVALID_ARGUMENT",
+                                "DEADLINE_EXCEEDED",
+                                "NOT_FOUND",
+                                "ALREADY_EXISTS",
+                                "PERMISSION_DENIED",
+                                "RESOURCE_EXHAUSTED",
+                                "FAILED_PRECONDITION",
+                                "ABORTED",
+                                "OUT_OF_RANGE",
+                                "UNIMPLEMENTED",
+                                "INTERNAL",
+                                "UNAVAILABLE",
+                                "DATA_LOSS",
+                                "UNAUTHENTICATED"
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "array",
+                          "minItems": 1,
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 16
+                              },
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "OK",
+                                  "CANCELLED",
+                                  "UNKNOWN",
+                                  "INVALID_ARGUMENT",
+                                  "DEADLINE_EXCEEDED",
+                                  "NOT_FOUND",
+                                  "ALREADY_EXISTS",
+                                  "PERMISSION_DENIED",
+                                  "RESOURCE_EXHAUSTED",
+                                  "FAILED_PRECONDITION",
+                                  "ABORTED",
+                                  "OUT_OF_RANGE",
+                                  "UNIMPLEMENTED",
+                                  "INTERNAL",
+                                  "UNAVAILABLE",
+                                  "DATA_LOSS",
+                                  "UNAUTHENTICATED"
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
                     },
                     "maxDuration": {
                       "type": "string",

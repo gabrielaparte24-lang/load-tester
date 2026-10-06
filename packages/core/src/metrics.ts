@@ -82,6 +82,8 @@ export type ErrorType =
   | "http_5xx"
   | "check_failed"
   | "template_error"
+  | "ws_error"
+  | "grpc_status"
   | "dropped"
   | "aborted"
   | "other";

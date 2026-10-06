@@ -9,6 +9,9 @@ import { slugify, type RunReport } from "@lt/core";
  * execuções. Os relatórios completos ficam em reports/<id>/ (o banco guarda o índice e o resumo).
  * Baselines usam o mesmo armazenamento do CLI (data/baselines), para valerem nos dois.
  */
+/** Exemplos adicionados depois da primeira versão do banco (importados também em bancos antigos). */
+const LATER_EXAMPLES = new Set(["examples/websocket.yaml", "examples/grpc.yaml"]);
+
 export interface ScenarioRow {
   id: string;
   name: string;
@@ -160,26 +163,34 @@ export class Store {
     return this.db.prepare("DELETE FROM scenarios WHERE id = ?").run(id).changes > 0;
   }
 
-  /** Na primeira inicialização, importa os exemplos do projeto como cenários. */
+  /**
+   * Importa os exemplos do projeto como cenários. Cada arquivo é importado uma única vez (mesmo que
+   * o usuário apague o cenário depois); exemplos novos de versões futuras entram na próxima subida.
+   */
   seedExamples(root: string): number {
-    if (this.meta("seeded")) return 0;
+    const done = new Set<string>(JSON.parse(this.meta("seededExamples") ?? "[]") as string[]);
+    // bancos anteriores só marcavam "seeded": considera importados os exemplos que já existiam então
+    const legacy = !!this.meta("seeded") && !this.meta("seededExamples");
     let n = 0;
     for (const sub of ["examples", "examples/perfis"]) {
       const dir = path.join(root, sub);
       if (!fs.existsSync(dir)) continue;
-      for (const f of fs
-        .readdirSync(dir)
-        .filter((x) => /\.ya?ml$/.test(x) && !x.startsWith("ci"))) {
+      for (const f of fs.readdirSync(dir).filter((x) => /.ya?ml$/.test(x) && !x.startsWith("ci"))) {
+        const key = `${sub}/${f}`;
+        if (done.has(key)) continue;
+        done.add(key);
+        if (legacy && !LATER_EXAMPLES.has(key)) continue;
         const yaml = fs.readFileSync(path.join(dir, f), "utf8");
         this.createScenario(
           yaml,
           dir,
-          `${sub.endsWith("perfis") ? "perfil-" : ""}${f.replace(/\.ya?ml$/, "")}`,
+          `${sub.endsWith("perfis") ? "perfil-" : ""}${f.replace(/.ya?ml$/, "")}`,
         );
         n++;
       }
     }
-    this.setMeta("seeded", new Date().toISOString());
+    this.setMeta("seededExamples", JSON.stringify([...done].sort()));
+    if (!this.meta("seeded")) this.setMeta("seeded", new Date().toISOString());
     return n;
   }
 
