@@ -265,9 +265,10 @@ Status: `ws:101` (sessão aberta) ou `ws:falha` (handshake recusado). Erros: `ti
 mensagem que não chegou a tempo), `connection_refused`/`dns`/…, `ws_error` (HTTP ≠ 101 no handshake,
 conexão fechada pelo servidor) e `check_failed`. Checagens aparecem como `msg N: …`.
 
-**gRPC** (unário) — o `.proto` é carregado na validação (serviço, método e streaming são conferidos com
-mensagens claras). `http://` = sem TLS; `https://` = TLS (com `target.tls.ca` para CA própria).
-`target.timeoutMs` é o deadline de cada chamada; `target.headers` e `metadata` viram metadados.
+**gRPC** (unário e streaming) — o `.proto` é carregado na validação (serviço, método e tipo de
+streaming são conferidos com mensagens claras). `http://` = sem TLS; `https://` = TLS (com `target.tls.ca` para CA própria).
+`target.timeoutMs` é o deadline da chamada unária (`grpc.deadline` muda); `target.headers` e
+`metadata` viram metadados.
 
 ```yaml
 - name: SayHello
@@ -284,7 +285,43 @@ mensagens claras). `http://` = sem TLS; `https://` = TLS (com `target.tls.ca` pa
 ```
 
 Status: `grpc:OK`, `grpc:UNAVAILABLE`… Erros: `grpc_status` (código fora de `grpcStatus`), `timeout`
-(DEADLINE_EXCEEDED), `connection_refused` e `check_failed`. Streaming ainda não é suportado.
+(DEADLINE_EXCEEDED), `connection_refused` e `check_failed`.
+
+**Streaming gRPC** — o tipo vem do `.proto` e define o que vale no `script` (ações em ordem):
+
+| tipo                                   | requisição       | `script`                                       | checagens da etapa (`expect`/`extract`) |
+| -------------------------------------- | ---------------- | ---------------------------------------------- | --------------------------------------- |
+| server (`returns (stream X)`)          | `message`        | `expect` (+ `extract`), `sleep`                | última mensagem do stream               |
+| client (`(stream X) returns (Y)`)      | `send` no script | `send`, `sleep`, `end`                         | a resposta única                        |
+| bidi (`(stream X) returns (stream Y)`) | `send` no script | `send`, `expect` (+ `extract`), `sleep`, `end` | última mensagem do stream               |
+
+```yaml
+- name: Chat
+  grpc:
+    proto: ./protos/demo.proto
+    service: demo.Greeter
+    method: Chat # bidi
+    deadline: 10s # prazo do stream inteiro (padrão nos streams: nenhum)
+    script:
+      - send: { name: Ana } # mensagem JSON com templates
+      - expect: { jsonPath: { "$.message": "Olá, Ana!" }, timeout: 1s } # PRÓXIMA mensagem
+        extract: { sessao: "$.metadata.x-sessao" } # vale para as ações seguintes
+      - send: { name: "${sessao}" }
+      - expect: { bodyMatches: "^Olá" }
+      - end: true # encerra o envio (implícito no fim do script)
+  expect:
+    grpcStatus: OK # status final
+    messages: ">= 2" # quantas mensagens chegaram
+```
+
+Depois do script, o envio é encerrado e o resto do stream é lido até o status final. Cada espera
+(`expect` ou o fim do stream) tem timeout (`expect.timeout` ou `target.timeoutMs` sem nenhuma
+mensagem nova), então streams longos e contínuos não estouram. A latência da etapa é o stream
+inteiro; `summary.grpcStreams` traz streams, mensagens enviadas/recebidas, tempo até a **1ª mensagem**
+e **RTT por mensagem** (do envio até o `expect` seguinte). Falhas: status no meio do stream
+(`grpc_status`), mensagem que não chegou (`timeout`), stream que terminou antes de um `expect`
+(`check_failed`, "o stream terminou antes") e `grpc.deadline` estourado (`timeout`). Exemplo com os
+três tipos: [examples/grpc-streaming.yaml](examples/grpc-streaming.yaml).
 
 ### Importar de cURL e OpenAPI
 
@@ -657,7 +694,8 @@ só o h2c fica indisponível).
   `{"echo": <mensagem>, "n": <nº>}`; `welcome=1` envia `{"type":"welcome","session":"<uuid>"}` ao conectar.
 - **gRPC** (sem TLS): `127.0.0.1:4102` (`LT_DEMO_GRPC_PORT`), serviço `demo.Greeter` em
   [packages/demo-target/proto/demo.proto](packages/demo-target/proto/demo.proto): `SayHello`,
-  `Slow { ms }`, `Flaky { every | rate, code }` (e `Chat`, streaming, só para mostrar a recusa).
+  `Slow { ms }`, `Flaky { every | rate, code }` e os streams `Countdown { from, interval_ms, fail_at }`
+  (server), `Sum` (client, soma `{ value }`) e `Chat` (bidi, responde a cada `{ name, delay_ms }`).
 
 ## Desenvolvimento
 
@@ -699,4 +737,5 @@ Estrutura: `packages/core` (motor, métricas, cenários, relatórios), `packages
 - [x] **Fase 4** — relatórios HTML/CSV/Markdown, JUnit, Prometheus, exemplo de GitHub Actions.
 - [x] **Fase 5** — API completa, SQLite, tempo real (SSE/WebSocket), dashboard React.
 - [x] **Extras** — WebSocket e gRPC (unário) como alvo.
-- [ ] gRPC com streaming; mensagens WebSocket binárias no roteiro.
+- [x] gRPC com streaming (server, client e bidi).
+- [ ] Mensagens WebSocket binárias no roteiro.

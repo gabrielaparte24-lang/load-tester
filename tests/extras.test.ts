@@ -73,9 +73,31 @@ describe("validação de etapas ws/grpc", () => {
     const g = (extra: string) => err(`  - grpc: { proto: ${PROTO}, ${extra} }`);
     expect(g("service: demo.Nada, method: SayHello")).toThrow(/disponíveis: demo\.Greeter/);
     expect(g("service: demo.Greeter, method: Nada")).toThrow(
-      /disponíveis: SayHello, Slow, Flaky, Chat/,
+      /disponíveis: SayHello, Slow, Flaky, Chat, Countdown, Sum/,
     );
-    expect(g("service: demo.Greeter, method: Chat")).toThrow(/streaming ainda não são suportados/);
+    // regras por tipo de streaming
+    const m = (method: string, extra: string) =>
+      g(`service: demo.Greeter, method: ${method}, ${extra}`);
+    expect(m("SayHello", "script: [ { send: {} } ]")).toThrow(/é unário: script só vale/);
+    expect(m("Chat", "message: { name: x }, script: [ { send: {} } ]")).toThrow(
+      /as mensagens vão no script \(send\)/,
+    );
+    expect(m("Chat", "script: [ { sleep: 1ms } ]")).toThrow(/informe ao menos um send/);
+    expect(m("Sum", "script: [ { send: {} }, { expect: {} } ]")).toThrow(
+      /expect não vale em client streaming/,
+    );
+    expect(m("Countdown", "script: [ { send: {} } ]")).toThrow(/send não vale em server streaming/);
+    expect(m("Chat", "script: [ { send: {}, end: true } ]")).toThrow(
+      /exatamente um entre send, expect, sleep e end/,
+    );
+    expect(
+      err(
+        `  - { grpc: { proto: ${PROTO}, service: demo.Greeter, method: SayHello }, expect: { messages: 1 } }`,
+      ),
+    ).toThrow(/messages só vale em métodos com streaming/);
+    expect(err(`  - { request: { path: / }, expect: { messages: 1 } }`)).toThrow(
+      /messages só vale em etapas grpc/,
+    );
     expect(err(`  - grpc: { proto: nao-existe.proto, service: a.B, method: C }`)).toThrow(
       /não foi possível carregar "nao-existe\.proto"/,
     );
@@ -298,5 +320,189 @@ flow:
       ),
     );
     expect((await checkTarget(sc.target.baseUrl, [])).allowed).toBe(false);
+  });
+});
+
+describe("gRPC com streaming", () => {
+  const step = (method: string, body: string, expectYaml = "") =>
+    `  - name: ${method}
+    grpc:
+      proto: ${PROTO}
+      service: demo.Greeter
+      method: ${method}
+${body
+  .split("\n")
+  .map((l) => `      ${l}`)
+  .join("\n")}${expectYaml ? `\n    expect: ${expectYaml}` : ""}`;
+  const short = "{ stages: [ { duration: 1s, rps: 5 } ] }";
+
+  it("server streaming: lê mensagens no roteiro, conta o total e checa a última", async () => {
+    const r = await run(
+      scenario(
+        demo.grpcUrl,
+        step(
+          "Countdown",
+          `message: { from: 5, interval_ms: 10 }
+script:
+  - expect: { jsonPath: { "$.n": 5, "$.remaining": 4 } }
+  - expect: { jsonPath: { "$.n": 4 } }`,
+          `{ messages: 5, jsonPath: { "$.message": "fim!" } }`,
+        ),
+      ),
+    );
+    const s = r.summary;
+    expect(s.requests).toEqual({ total: 40, ok: 40, failed: 0 });
+    expect(s.statusCodes).toEqual({ "grpc:OK": 40 });
+    expect(s.grpcStreams).toMatchObject({ streams: 40, messagesSent: 40, messagesReceived: 200 });
+    expect(s.grpcStreams!.firstMessageMs.count).toBe(40);
+    expect(s.checks).toEqual({ passed: 40 * 5, failed: 0 });
+    // 5 mensagens a cada 10 ms + fim: a etapa dura o stream inteiro
+    expect(r.steps[0]!.latencyMs.p50).toBeGreaterThanOrEqual(45);
+  });
+
+  it("client streaming: envia pelo roteiro e a resposta única alimenta a etapa seguinte", async () => {
+    const r = await run(
+      scenario(
+        demo.grpcUrl,
+        `${step(
+          "Sum",
+          `script:
+  - send: { value: 1 }
+  - send: { value: "\${randInt(2, 2)}" }
+  - sleep: 5ms
+  - send: { value: 0.5 }`,
+          `{ messages: 1, jsonPath: { "$.count": 3, "$.total": 3.5 } }`,
+        )}
+    extract: { total: "$.total" }
+${step("SayHello", `message: { name: "\${total}" }`, `{ jsonPath: { "$.message": "Olá, 3.5!" } }`)}`,
+      ),
+    );
+    expect(r.summary.requests.failed).toBe(0);
+    expect(r.summary.requests.total).toBe(80);
+    expect(r.summary.grpcStreams).toMatchObject({
+      streams: 40,
+      messagesSent: 120,
+      messagesReceived: 40,
+    });
+  });
+
+  it("bidi: envio e leitura intercalados, extração entre mensagens e RTT", async () => {
+    const r = await run(
+      scenario(
+        demo.grpcUrl,
+        step(
+          "Chat",
+          `metadata: { x-sessao: "s\${iteration()}" }
+script:
+  - send: { name: Ana }
+  - expect: { jsonPath: { "$.message": "Olá, Ana!" } }
+    extract: { sessao: "$.metadata.x-sessao" }
+  - send: { name: "\${sessao}" }
+  - expect: { bodyMatches: "Olá, s\\\\d+!" }
+  - end: true`,
+          "{ messages: 2 }",
+        ),
+      ),
+    );
+    const s = r.summary;
+    expect(s.requests.failed).toBe(0);
+    expect(s.grpcStreams).toMatchObject({ streams: 40, messagesSent: 80, messagesReceived: 80 });
+    expect(s.grpcStreams!.rttMs.count).toBe(80);
+    expect(r.steps[0]!.checks.map((c) => c.name)).toContain("msg 1: extrair sessao");
+  });
+
+  it("classifica falhas: status no meio do stream, timeout, fim antecipado e deadline", async () => {
+    const failAt = await run(
+      scenario(
+        demo.grpcUrl,
+        step("Countdown", "message: { from: 5, fail_at: 2 }", "{ messages: 2 }"),
+        short,
+      ),
+    );
+    expect(failAt.summary.errorsByType).toEqual({ grpc_status: 5 });
+    expect(failAt.summary.statusCodes).toEqual({ "grpc:ABORTED": 5 });
+    expect(failAt.summary.grpcStreams!.messagesReceived).toBe(10);
+    expect(failAt.steps[0]!.failures[0]!.message).toMatch(/^status ABORTED: falha simulada após 2/);
+
+    const accepted = await run(
+      scenario(
+        demo.grpcUrl,
+        step(
+          "Countdown",
+          "message: { from: 5, fail_at: 2 }",
+          "{ grpcStatus: [OK, ABORTED], messages: 2 }",
+        ),
+        short,
+      ),
+    );
+    expect(accepted.summary.requests.failed).toBe(0);
+
+    const slow = await run(
+      scenario(
+        demo.grpcUrl,
+        step(
+          "Countdown",
+          `message: { from: 3, interval_ms: 300 }
+script:
+  - expect: {}
+  - expect: { timeout: 100ms }`,
+        ),
+        short,
+      ),
+    );
+    expect(slow.summary.errorsByType).toEqual({ timeout: 5 });
+    expect(slow.steps[0]!.failures[0]!.message).toBe("msg 2: nenhuma mensagem em 100ms");
+
+    const early = await run(
+      scenario(
+        demo.grpcUrl,
+        step(
+          "Countdown",
+          `message: { from: 1 }
+script:
+  - expect: {}
+  - expect: {}`,
+        ),
+        short,
+      ),
+    );
+    expect(early.summary.errorsByType).toEqual({ check_failed: 5 });
+    expect(early.steps[0]!.failures[0]!.message).toBe("msg 2: o stream terminou antes");
+
+    const idle = await run(
+      scenario(
+        demo.grpcUrl,
+        step("Chat", "script: [ { send: { name: x, delay_ms: 500 } } ]"),
+        short,
+      ).replace("timeoutMs: 2000", "timeoutMs: 100"),
+    );
+    expect(idle.summary.errorsByType).toEqual({ timeout: 5 });
+    expect(idle.steps[0]!.failures[0]!.message).toMatch(/o stream não terminou/);
+
+    const deadline = await run(
+      scenario(
+        demo.grpcUrl,
+        step("Countdown", "message: { from: 10, interval_ms: 50 }\ndeadline: 120ms"),
+        short,
+      ),
+    );
+    expect(deadline.summary.errorsByType).toEqual({ timeout: 5 });
+    expect(deadline.summary.statusCodes).toEqual({ "grpc:DEADLINE_EXCEEDED": 5 });
+  });
+
+  it("parar durante streams longos encerra em segundos", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 600);
+    const t0 = Date.now();
+    const r = await run(
+      scenario(
+        demo.grpcUrl,
+        step("Countdown", "message: { from: 1000, interval_ms: 100 }"),
+        "{ stages: [ { duration: 30s, rps: 5 } ] }",
+      ),
+      { stopSignal: ac.signal, drainTimeoutMs: 1000 },
+    );
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(r.run.status).toBe("interrupted");
   });
 });

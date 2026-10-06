@@ -336,12 +336,12 @@ describe("persistência", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("bancos antigos recebem só os exemplos novos (WebSocket/gRPC)", () => {
+  it("bancos antigos recebem só os exemplos novos (WebSocket/gRPC/streaming)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lt-store-"));
     const store = new Store(path.join(dir, "lt.db"));
     store.setMeta("seeded", "2026-01-01T00:00:00Z"); // formato anterior
     const root = path.resolve(import.meta.dirname, "..");
-    expect(store.seedExamples(root)).toBe(2);
+    expect(store.seedExamples(root)).toBe(3);
     expect(store.getScenario("websocket")?.name).toBe("websocket-echo");
     expect(store.getScenario("grpc")?.name).toBe("grpc-greeter");
     store.deleteScenario("grpc");
