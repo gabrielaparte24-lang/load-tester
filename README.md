@@ -1,6 +1,6 @@
 # lt — testador de carga e benchmarking de endpoints HTTP
 
-CLI + (em breve) dashboard em tempo real + relatórios reproduzíveis, com métricas estatisticamente corretas
+CLI + dashboard em tempo real + relatórios reproduzíveis, com métricas estatisticamente corretas
 (HdrHistogram, correção de omissão coordenada) e thresholds para CI.
 
 > **⚠ Uso responsável.** Use apenas contra sistemas próprios ou com **autorização por escrito**.
@@ -8,11 +8,11 @@ CLI + (em breve) dashboard em tempo real + relatórios reproduzíveis, com métr
 > `localhost`/`127.0.0.1`/`::1` e nas faixas de `ALLOWED_TARGETS`; qualquer outro host exige
 > `--i-own-this-target` **e** confirmação explícita do hostname.
 
-**Estado:** Fases 0 a 4 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
+**Estado:** Fases 0 a 5 concluídas — scripts de operação, demo-target, `lt run` com modelo aberto,
 relatório JSON e cenários completos (JSON Schema, templates, CSV, encadeamento, checagens, pesos,
 `lt init`, importação de cURL/OpenAPI), motor multi-núcleo com modelos aberto e fechado, perfis,
 tempos por fase, HTTP/2, detecção de saturação, benchmarks A/B com significância estatística e
-baselines de regressão, relatórios HTML/CSV/Markdown/JUnit/Prometheus e exemplo de CI. Veja o [roadmap](#roadmap).
+baselines de regressão, relatórios HTML/CSV/Markdown/JUnit/Prometheus, exemplo de CI, API REST + SSE e dashboard web. Veja o [roadmap](#roadmap).
 
 ## Requisitos
 
@@ -37,7 +37,7 @@ Equivalentes sem npm: `scripts/<nome>.sh` (Linux/macOS), `scripts\<nome>.bat` (c
 | --------- | ---------------------------------------------------------------------------------------------------------- |
 | `setup`   | `--skip-build` (só instala), `--force` (reinstala dependências mesmo se atualizadas)                       |
 | `start`   | `--with-demo`, `--foreground` (primeiro plano), `--dev` (hot reload com `tsx watch`), `--open` (navegador) |
-| `stop`    | `--clean-logs` (apaga `logs/*.log*`), `--timeout=10` (segundos antes de forçar)                            |
+| `stop`    | `--clean-logs` (apaga `logs/*.log*`), `--timeout=20` (segundos antes de forçar)                            |
 | `restart` | repassa as opções ao `start`                                                                               |
 
 Como os scripts se comportam:
@@ -521,6 +521,76 @@ cat reports/ci/x/summary.md >> "$GITHUB_STEP_SUMMARY"
 Baselines só são comparáveis na **mesma máquina/ambiente**. Gere a baseline versionada no próprio
 runner (ou numa máquina equivalente) e, se possível, a partir de `lt bench`.
 
+## Dashboard e API
+
+`npm start` sobe a API e o dashboard em **http://127.0.0.1:4000** (`npm start -- --open` abre o
+navegador). Na primeira vez, os cenários de `examples/` são importados.
+
+| Tela              | O que faz                                                                                                                                                                                                                                   |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Cenários**      | Lista e editor YAML (CodeMirror) com **validação em tempo real**: erros marcados no texto com linha/coluna, clique para ir à linha, prévia das 3 primeiras requisições montadas. Salvar, excluir e **Executar**.                            |
+| **Ao vivo**       | Gráficos por segundo (vazão pedida × enviada, latência p50/p95/p99, erros, VUs/concorrência), indicadores, progresso por etapa com ETA, log resumido e o botão **Parar** (kill switch: drena e salva o parcial em menos de 1 s nos testes). |
+| **Resultados**    | Histórico do dashboard **e do CLI** (importado de `reports/`), filtros por cenário/estado/texto, relatório completo, marcar **baseline** (a mesma usada por `lt run --baseline`) e seleção de duas execuções para comparar.                 |
+| **Comparar**      | Escolha A e B, α e efeito mínimo; tabela com Δ%, IC 95%, p ajustado e veredito (pior/melhor/diferença pequena/sem diferença).                                                                                                               |
+| **Configurações** | Estado do servidor, tempo real, limites de segurança, alvos permitidos, armazenamento e tema (sistema/claro/escuro).                                                                                                                        |
+
+Executar pelo dashboard segue as mesmas regras do CLI:
+
+- uma execução por vez (duas cargas simultâneas invalidariam as duas medições);
+- tetos de RPS, VUs, conexões e duração;
+- para alvos **fora da allowlist**, o diálogo exige declarar a autorização **e digitar o host**.
+
+Interface: responsiva (testada em 375 px sem rolagem horizontal), tema claro/escuro com paleta
+validada para daltonismo, navegação por teclado, estados de carregamento/erro e status sempre com ícone e
+texto (nunca só cor).
+
+### API (REST + SSE)
+
+| Método e rota                                                                                    | Descrição                                                                                         |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `GET /api/health` · `GET /api/status`                                                            | identificação; versão, limites, allowlist, execuções ativas, armazenamento                        |
+| `GET /api/scenarios` · `GET /api/scenarios/:id`                                                  | lista / um cenário (com o YAML)                                                                   |
+| `POST /api/scenarios` `{yaml}` · `PUT /api/scenarios/:id` `{yaml}` · `DELETE /api/scenarios/:id` | cria (201), atualiza, exclui (204)                                                                |
+| `POST /api/scenarios/validate` `{yaml, preview?}`                                                | `{valid, issues[{path,message,line,col}], summary, preview}`                                      |
+| `POST /api/runs` `{scenarioId \| yaml, workers?, iOwnThisTarget?, confirmTarget?}`               | inicia (202); 409 se já houver execução; 403 `target_confirmation_required`; 422 cenário inválido |
+| `POST /api/runs/:id/stop`                                                                        | kill switch (202)                                                                                 |
+| `GET /api/runs?scenario=&status=&q=&limit=&offset=`                                              | histórico paginado                                                                                |
+| `GET /api/runs/:id`                                                                              | execução + relatório (ou, se ativa, histórico por segundo e logs)                                 |
+| `GET /api/runs/:id/report?format=html\|json\|md\|csv\|junit`                                     | arquivos do relatório                                                                             |
+| `POST /api/runs/:id/baseline` · `GET /api/baselines` · `DELETE /api/baselines/:cenario`          | baselines por cenário                                                                             |
+| `POST /api/compare` `{a, b, alpha?, minEffectPct?, blockSeconds?}`                               | comparação estatística                                                                            |
+| `GET /api/events`                                                                                | **SSE**: `hello`, `run-started`, `progress` (1/s), `log`, `run-finished`, `scenarios-changed`     |
+| `GET /metrics`                                                                                   | Prometheus: execuções por status, ativas e as métricas ao vivo da execução em andamento           |
+
+SSE em vez de WebSocket: o tráfego é só servidor → navegador, a reconexão é automática e funciona
+através de qualquer proxy HTTP.
+
+Entradas validadas por JSON Schema: campos desconhecidos dão 400, e não são ignorados em silêncio. As
+proteções:
+
+- o servidor escuta **só em 127.0.0.1**;
+- o `Host` precisa ser de loopback (defesa contra DNS rebinding, 421);
+- CORS restrito a origens localhost;
+- requisições que alteram estado vindas de outra origem recebem 403 (CSRF);
+- o encerramento pelo `npm run stop` usa um token aleatório.
+
+**Armazenamento:**
+
+- `data/lt.db` (SQLite via `node:sqlite`, sem compilação nativa) guarda cenários e o índice de execuções;
+- os relatórios completos ficam em `reports/<id>/`;
+- as baselines ficam em `data/baselines/`, compartilhadas com o CLI.
+
+Ao parar o servidor com execuções em andamento, elas são interrompidas e salvas como `interrupted`. Se o
+processo morrer de forma abrupta, as execuções que ficaram "em andamento" viram `failed` na próxima
+inicialização.
+
+### Desenvolvimento do dashboard
+
+```bash
+npm start -- --dev        # API com hot reload (tsx watch), em primeiro plano
+npm run dev:web           # Vite em http://127.0.0.1:5173 com proxy para a API
+```
+
 ## Alvo de demonstração
 
 `npm start -- --with-demo` sobe em `http://127.0.0.1:4100`:
@@ -532,13 +602,14 @@ só o h2c fica indisponível).
 ## Desenvolvimento
 
 ```bash
-npm run build       # tsc -b (monorepo com project references)
+npm run build       # tsc -b (pacotes) + Vite (dashboard em packages/web/dist)
 npm test            # build + Vitest (unidade, parser, percentis, taxa ±2%, erros, kill switch, API)
 npm run lint        # ESLint
 npm run format      # Prettier
 ```
 
-Estrutura: `packages/core` (motor, métricas, cenários), `packages/cli` (`lt`), `packages/server` (API),
+Estrutura: `packages/core` (motor, métricas, cenários, relatórios), `packages/cli` (`lt`), `packages/server`
+(API, SQLite, SSE), `packages/web` (dashboard React + Vite),
 `packages/demo-target`, `scripts/` (operação), `examples/`, `tests/`.
 
 ## Solução de problemas
@@ -566,5 +637,5 @@ Estrutura: `packages/core` (motor, métricas, cenários), `packages/cli` (`lt`),
       DNS/conexão/TLS/TTFB, HTTP/2, detecção ampliada de saturação, CPU/memória.
 - [x] **Fase 3** — `lt bench`, A/B, `lt compare` com significância estatística, baseline.
 - [x] **Fase 4** — relatórios HTML/CSV/Markdown, JUnit, Prometheus, exemplo de GitHub Actions.
-- [ ] **Fase 5** — API completa, SQLite, tempo real (SSE/WebSocket), dashboard React.
+- [x] **Fase 5** — API completa, SQLite, tempo real (SSE/WebSocket), dashboard React.
 - [ ] **Extras** — WebSocket e gRPC como alvo.
