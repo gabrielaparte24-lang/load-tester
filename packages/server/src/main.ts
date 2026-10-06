@@ -17,8 +17,8 @@ async function shutdown(reason: string): Promise<void> {
   if (closing) return;
   closing = true;
   app.log.info(`encerrando (${reason})`);
-  // Fase 5: interromper execuções em andamento e salvar resultados parciais aqui.
-  const force = setTimeout(() => process.exit(0), 5000);
+  // app.close() interrompe execuções em andamento e espera os relatórios parciais (ver preClose)
+  const force = setTimeout(() => process.exit(0), 20_000);
   force.unref();
   await app.close();
   process.exit(0);
