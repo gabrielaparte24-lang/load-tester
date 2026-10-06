@@ -14,6 +14,7 @@ const LATER_EXAMPLES = new Set([
   "examples/websocket.yaml",
   "examples/grpc.yaml",
   "examples/grpc-streaming.yaml",
+  "examples/websocket-binario.yaml",
 ]);
 
 export interface ScenarioRow {

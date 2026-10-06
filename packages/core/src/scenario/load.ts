@@ -9,6 +9,7 @@ import type { RateStage } from "../schedule.js";
 import { parseThreshold } from "../thresholds.js";
 import { csvToTable } from "./csv.js";
 import { parseJsonPath } from "./jsonpath.js";
+import { MAX_BINARY_FILE, binaryProblem } from "./binary.js";
 import { parseMatcher } from "./matchers.js";
 import { GRPC_CODES, scenarioSchema } from "./schema.js";
 import * as protoLoader from "@grpc/proto-loader";
@@ -469,13 +470,15 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
       bodyContains:
         e.bodyContains === undefined ? [] : ([] as string[]).concat(e.bodyContains as string),
     };
-    if (e.messages !== undefined) {
+    for (const k of ["messages", "size", "hex"] as const) {
+      if (e[k] === undefined) continue;
       try {
-        expect.messages = parseMatcher(e.messages);
+        expect[k] = parseMatcher(e[k]);
       } catch (err) {
-        loc.fail([...ep, "messages"], (err as Error).message);
+        loc.fail([...ep, k], (err as Error).message);
       }
     }
+    if (e.type !== undefined) expect.messageType = e.type as "text" | "binary";
     for (const [jp, m] of Object.entries((e.jsonPath as Obj) ?? {})) {
       try {
         expect.jsonPath.push({ path: jp, segments: parseJsonPath(jp), matcher: parseMatcher(m) });
@@ -510,9 +513,16 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
           continue;
         }
         const o = spec as Obj;
-        const which = ["jsonPath", "regex", "header"].filter((k) => o[k] !== undefined);
+        const which = ["jsonPath", "regex", "header", "bytes"].filter((k) => o[k] !== undefined);
         if (which.length !== 1) {
-          loc.fail(xp, "informe exatamente um entre jsonPath, regex e header");
+          loc.fail(xp, "informe exatamente um entre jsonPath, regex, header e bytes");
+          continue;
+        }
+        if (o.bytes !== undefined) {
+          extract.push([
+            name,
+            { kind: "bytes", encoding: o.bytes as "hex" | "base64", default: o.default },
+          ]);
           continue;
         }
         if (o.jsonPath !== undefined) {
@@ -614,7 +624,7 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     };
   };
 
-  type ScriptKind = "send" | "sendJson" | "expect" | "sleep" | "end";
+  type ScriptKind = "send" | "sendJson" | "sendBinary" | "expect" | "sleep" | "end";
   const listPt = (xs: string[]) =>
     xs.length > 1 ? `${xs.slice(0, -1).join(", ")} e ${xs[xs.length - 1]}` : (xs[0] ?? "");
 
@@ -634,7 +644,7 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
     let expects = 0;
     items.forEach((a, i) => {
       const ap: Path = [...sp, i];
-      const kinds = (["send", "sendJson", "expect", "sleep", "end"] as const).filter(
+      const kinds = (["send", "sendJson", "sendBinary", "expect", "sleep", "end"] as const).filter(
         (k) => a[k] !== undefined,
       );
       if (kinds.length !== 1) {
@@ -660,6 +670,29 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
           json: compileJson(a[k], copts, (tt, jp) =>
             checkRefs(tt, [...ap, k, ...jp], local, later),
           ),
+        });
+      } else if (k === "sendBinary") {
+        const b = a.sendBinary as Obj;
+        const bp: Path = [...ap, "sendBinary"];
+        const encs = (["hex", "base64", "file"] as const).filter((x) => b[x] !== undefined);
+        if (encs.length !== 1) {
+          loc.fail(bp, "informe exatamente um entre hex, base64 e file");
+          return;
+        }
+        const enc = encs[0]!;
+        if (enc === "file") {
+          const data = readFile(b.file as string, [...bp, "file"]);
+          if (data && data.length > MAX_BINARY_FILE) {
+            loc.fail([...bp, "file"], `arquivo maior que ${MAX_BINARY_FILE / 1024 / 1024}MB`);
+          } else if (data) script.push({ kind: "send", binary: { encoding: "file", data } });
+          return;
+        }
+        const raw = String(b[enc]);
+        const problem = raw.includes("${") ? undefined : binaryProblem(enc, raw);
+        if (problem) loc.fail([...bp, enc], problem);
+        script.push({
+          kind: "send",
+          binary: { encoding: enc, template: tpl(b[enc], [...bp, enc], local, later) },
         });
       } else if (k === "sleep") {
         script.push({ kind: "sleep", ms: parseDuration(a.sleep as string) });
@@ -691,7 +724,11 @@ export function parseScenario(text: string, file?: string, opts: ParseOptions = 
       [...wp, "script"],
       scope,
       later,
-      { allowed: ["send", "sendJson", "expect", "sleep"], sendIsJson: false, what: "em WebSocket" },
+      {
+        allowed: ["send", "sendJson", "sendBinary", "expect", "sleep"],
+        sendIsJson: false,
+        what: "em WebSocket",
+      },
     ) as WsAction[];
     if (!script.length) loc.fail(wp, "informe um script com ao menos uma ação (send/expect/sleep)");
     return {

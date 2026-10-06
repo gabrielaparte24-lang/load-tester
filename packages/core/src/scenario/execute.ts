@@ -251,6 +251,9 @@ export function evaluateResponse(
       const r = evalJsonPath(x.segments, json);
       found = r.found;
       value = r.value;
+    } else if (!bodyProblem && x.kind === "bytes") {
+      value = (res.body ?? Buffer.alloc(0)).toString(x.encoding);
+      found = true;
     } else if (!bodyProblem && x.kind === "regex") {
       const m = x.re.exec(getText());
       found = !!m && m[x.group] !== undefined;
@@ -264,7 +267,13 @@ export function evaluateResponse(
     if (found) ctx.vars.set(name, value);
     else {
       const how =
-        x.kind === "header" ? `header ${x.name}` : x.kind === "regex" ? `/${x.re.source}/` : x.path;
+        x.kind === "header"
+          ? `header ${x.name}`
+          : x.kind === "regex"
+            ? `/${x.re.source}/`
+            : x.kind === "bytes"
+              ? `bytes ${x.encoding}`
+              : x.path;
       fail("check_failed", `não foi possível extrair ${name} (${how})`);
     }
   }

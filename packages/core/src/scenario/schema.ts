@@ -88,6 +88,10 @@ const extractSchema = {
       regex: { type: "string" },
       group: { type: "integer", minimum: 0 },
       header: { type: "string" },
+      bytes: {
+        enum: ["hex", "base64"],
+        description: "Corpo/mensagem inteiro codificado (ex.: para devolver bytes num sendBinary)",
+      },
       default: {},
     },
   },
@@ -133,6 +137,17 @@ const messageExpect = {
   },
 };
 
+/** Mensagem WebSocket: as checagens comuns + tipo do quadro, tamanho e conteúdo em hex. */
+const wsMessageExpect = {
+  ...messageExpect,
+  properties: {
+    ...messageExpect.properties,
+    type: { enum: ["text", "binary"], description: "Tipo do quadro recebido" },
+    size: { ...matcher, description: 'Tamanho em bytes (ex.: 16, ">= 4")' },
+    hex: { ...matcher, description: 'Conteúdo em hex minúsculo (ex.: "cafebabe", "~^ca")' },
+  },
+};
+
 const ws = {
   type: "object",
   additionalProperties: false,
@@ -149,14 +164,27 @@ const ws = {
     subprotocols: { type: "array", items: { type: "string" } },
     script: {
       type: "array",
-      description: "Ações em ordem: send | sendJson | expect (+ extract) | sleep",
+      description: "Ações em ordem: send | sendJson | sendBinary | expect (+ extract) | sleep",
       items: {
         type: "object",
         additionalProperties: false,
         properties: {
           send: { ...scalar, description: "Mensagem de texto (templates)" },
           sendJson: { description: "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)" },
-          expect: messageExpect,
+          sendBinary: {
+            type: "object",
+            additionalProperties: false,
+            description: "Mensagem binária: hex ou base64 (com templates) ou arquivo",
+            properties: {
+              hex: {
+                type: "string",
+                description: 'Bytes em hex (espaços ignorados): "ca fe ba be"',
+              },
+              base64: { type: "string" },
+              file: { type: "string", description: "Arquivo (relativo ao cenário), até 16MB" },
+            },
+          },
+          expect: wsMessageExpect,
           extract: extractSchema,
           sleep: duration,
         },

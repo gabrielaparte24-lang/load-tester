@@ -3,7 +3,8 @@ import { stringify } from "yaml";
 import { maskHeaders, maskText } from "../secrets.js";
 import { buildRequest, createIteration, templateErrorMessage } from "./execute.js";
 import { renderJson, renderTemplate, type RenderContext, type Template } from "./template.js";
-import type { Scenario, StreamAction } from "./types.js";
+import { decodeBinary } from "./binary.js";
+import type { BinarySource, Scenario, StreamAction } from "./types.js";
 
 export interface PreviewRequest {
   iteration: number;
@@ -16,12 +17,27 @@ export interface PreviewRequest {
   error?: string;
 }
 
+function describeBinary(b: BinarySource, ctx: RenderContext): string {
+  let data = b.encoding === "file" ? b.data : undefined;
+  if (b.encoding !== "file") {
+    const text = renderTemplate(b.template, ctx);
+    // valor que só existe após um extract aparece como <nome>: mostra o texto
+    if (/<[^>]+>/.test(text)) return `${b.encoding} ${text}`;
+    data = decodeBinary(b.encoding, text);
+  }
+  data = data!;
+  const hex = data.subarray(0, 32).toString("hex");
+  return `${data.length} bytes: ${hex}${data.length > 32 ? "…" : ""}`;
+}
+
 /** Roteiro de mensagens (WebSocket ou stream gRPC), uma ação por linha. */
 function describeScript(script: StreamAction[], ctx: RenderContext): string {
   return script
     .map((a) =>
       a.kind === "send"
-        ? `send ${a.text ? renderTemplate(a.text, ctx) : JSON.stringify(renderJson(a.json!, ctx))}`
+        ? a.binary
+          ? `sendBinary ${describeBinary(a.binary, ctx)}`
+          : `send ${a.text ? renderTemplate(a.text, ctx) : JSON.stringify(renderJson(a.json!, ctx))}`
         : a.kind === "sleep"
           ? `sleep ${a.ms}ms`
           : a.kind === "end"

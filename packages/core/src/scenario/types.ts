@@ -39,16 +39,28 @@ export interface ExpectSpec {
   headers: { name: string; matcher: Matcher }[];
   bodyContains: string[];
   bodyMatches?: RegExp;
+  /** WebSocket: tipo do quadro recebido. */
+  messageType?: "text" | "binary";
+  /** WebSocket: tamanho da mensagem em bytes. */
+  size?: Matcher;
+  /** WebSocket: conteúdo da mensagem em hexadecimal minúsculo. */
+  hex?: Matcher;
 }
 
 export type Extractor =
   | { kind: "jsonPath"; path: string; segments: Segment[]; default?: unknown }
   | { kind: "regex"; re: RegExp; group: number; default?: unknown }
-  | { kind: "header"; name: string; default?: unknown };
+  | { kind: "header"; name: string; default?: unknown }
+  /** O corpo/mensagem inteiro codificado (útil para devolver bytes num sendBinary). */
+  | { kind: "bytes"; encoding: "hex" | "base64"; default?: unknown };
+
+/** Conteúdo de uma mensagem binária: texto codificado (com templates) ou arquivo lido na validação. */
+export type BinarySource =
+  { encoding: "hex" | "base64"; template: Template } | { encoding: "file"; data: Buffer };
 
 /** Ação do roteiro de uma etapa WebSocket. */
 export type WsAction =
-  | { kind: "send"; text?: Template; json?: JsonTemplate }
+  | { kind: "send"; text?: Template; json?: JsonTemplate; binary?: BinarySource }
   | {
       kind: "expect";
       /** Espera a PRÓXIMA mensagem por até timeoutMs e a checa. */

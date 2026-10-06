@@ -1,5 +1,5 @@
 import type http from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
@@ -15,7 +15,8 @@ export const DEMO_PROTO = fileURLToPath(new URL("../proto/demo.proto", import.me
  * WebSocket de demonstração no mesmo servidor HTTP:
  *   /ws/echo?delay=0&welcome=0
  * Cada mensagem é devolvida. Se for JSON, a resposta é {"echo": <mensagem>, "n": <nº da mensagem>}.
- * Com welcome=1, envia {"type":"welcome","session":"<uuid>"} ao conectar.
+ * Com welcome=1, envia {"type":"welcome","session":"<uuid>"} ao conectar; com welcome=binary, um
+ * quadro binário de 16 bytes: "LT01" (4c543031) + 12 bytes aleatórios. Quadros binários voltam binários.
  */
 export function attachDemoWebSocket(server: http.Server): { closeAll: () => void } {
   const wss = new WebSocketServer({
@@ -30,14 +31,15 @@ export function attachDemoWebSocket(server: http.Server): { closeAll: () => void
       return;
     }
     const delay = Math.min(MAX_SLEEP_MS, Math.max(0, Number(url.searchParams.get("delay")) || 0));
-    const welcome = url.searchParams.get("welcome") === "1";
+    const welcome = url.searchParams.get("welcome") ?? "0";
     wss.handleUpgrade(req, socket, head, (ws) => onSession(ws, delay, welcome));
   });
 
-  function onSession(ws: WebSocket, delay: number, welcome: boolean): void {
+  function onSession(ws: WebSocket, delay: number, welcome: string): void {
     let n = 0;
     ws.on("error", () => ws.terminate());
-    if (welcome) ws.send(JSON.stringify({ type: "welcome", session: randomUUID() }));
+    if (welcome === "1") ws.send(JSON.stringify({ type: "welcome", session: randomUUID() }));
+    if (welcome === "binary") ws.send(Buffer.concat([Buffer.from("LT01"), randomBytes(12)]));
     ws.on("message", (data, isBinary) => {
       n++;
       let reply: string | Buffer = data as Buffer;

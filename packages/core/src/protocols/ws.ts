@@ -8,7 +8,8 @@ import {
   type RenderContext,
   type Template,
 } from "../scenario/template.js";
-import type { Step } from "../scenario/types.js";
+import { decodeBinary } from "../scenario/binary.js";
+import type { ExpectSpec, Step, WsAction } from "../scenario/types.js";
 import type { ProtocolOutcome } from "./outcome.js";
 
 export interface WsDeps {
@@ -80,20 +81,23 @@ export async function runWsStep(
     dispatcher,
   });
   ws.binaryType = "arraybuffer";
-  const queue: Buffer[] = [];
-  let waiter: ((b: Buffer | undefined) => void) | null = null;
+  const queue: Msg[] = [];
+  let waiter: ((m: Msg | undefined) => void) | null = null;
   let closed: { code: number; reason: string } | null = null;
 
   ws.addEventListener("message", (ev) => {
     const data = ev.data as string | ArrayBuffer;
-    const buf = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
-    bytesIn += buf.length;
+    const m: Msg =
+      typeof data === "string"
+        ? { data: Buffer.from(data), binary: false }
+        : { data: Buffer.from(data), binary: true };
+    bytesIn += m.data.length;
     received++;
     if (waiter) {
       const w = waiter;
       waiter = null;
-      w(buf);
-    } else queue.push(buf);
+      w(m);
+    } else queue.push(m);
   });
   ws.addEventListener("close", (ev) => {
     closed = { code: ev.code, reason: ev.reason };
@@ -129,11 +133,9 @@ export async function runWsStep(
     let lastSend: number | null = null;
     for (const a of spec.script) {
       if (a.kind === "send") {
-        const text = a.text
-          ? renderTemplate(a.text, ctx)
-          : JSON.stringify(renderJson(a.json!, ctx));
-        ws.send(text);
-        bytesOut += Buffer.byteLength(text);
+        const payload = outgoing(a, ctx);
+        ws.send(payload);
+        bytesOut += typeof payload === "string" ? Buffer.byteLength(payload) : payload.length;
         sent++;
         lastSend = performance.now();
       } else if (a.kind === "sleep") {
@@ -143,14 +145,14 @@ export async function runWsStep(
           queue.shift() ??
           (closed
             ? undefined
-            : await new Promise<Buffer | undefined | "timeout">((resolve) => {
+            : await new Promise<Msg | undefined | "timeout">((resolve) => {
                 const to = setTimeout(() => {
                   waiter = null;
                   resolve("timeout");
                 }, a.timeoutMs);
-                waiter = (b) => {
+                waiter = (m) => {
                   clearTimeout(to);
-                  resolve(b);
+                  resolve(m);
                 };
               }));
         if (d.hardSignal.aborted)
@@ -176,14 +178,18 @@ export async function runWsStep(
           d.onRtt(performance.now() - lastSend);
           lastSend = null;
         }
+        const frame = frameChecks(a.expect, msg);
         const pseudo: Step = { ...step, expect: a.expect, extract: a.extract, needsBody: true };
-        const ev = evaluateResponse(pseudo, { status: 200, headers: {}, body: msg }, 0, ctx);
-        checks.push(...ev.checks.map((c) => ({ label: `msg ${a.index}: ${c.label}`, ok: c.ok })));
-        if (ev.error)
+        const ev = evaluateResponse(pseudo, { status: 200, headers: {}, body: msg.data }, 0, ctx);
+        for (const c of [...frame, ...ev.checks]) {
+          checks.push({ label: `msg ${a.index}: ${c.label}`, ok: c.ok });
+        }
+        const failed = frame.find((c) => !c.ok);
+        if (failed || ev.error)
           return out({
             statusKey: "ws:101",
-            error: ev.error,
-            message: `msg ${a.index}: ${ev.message}`,
+            error: failed ? "check_failed" : ev.error,
+            message: `msg ${a.index}: ${failed ? failed.why : ev.message}`,
           });
       }
     }
@@ -226,4 +232,48 @@ function observe<H extends object>(
       return (v as (...a: unknown[]) => unknown).bind(t);
     },
   });
+}
+
+interface Msg {
+  data: Buffer;
+  binary: boolean;
+}
+
+/** Conteúdo de um send: texto (send/sendJson) ou bytes (sendBinary). */
+function outgoing(a: Extract<WsAction, { kind: "send" }>, ctx: RenderContext): string | Buffer {
+  if (a.binary) {
+    return a.binary.encoding === "file"
+      ? a.binary.data
+      : decodeBinary(a.binary.encoding, renderTemplate(a.binary.template, ctx));
+  }
+  return a.text ? renderTemplate(a.text, ctx) : JSON.stringify(renderJson(a.json!, ctx));
+}
+
+/** Checagens do quadro: tipo (text/binary), tamanho em bytes e conteúdo em hex. */
+function frameChecks(ex: ExpectSpec, m: Msg): { label: string; ok: boolean; why: string }[] {
+  const out: { label: string; ok: boolean; why: string }[] = [];
+  const type = m.binary ? "binary" : "text";
+  if (ex.messageType) {
+    out.push({
+      label: `tipo = ${ex.messageType}`,
+      ok: type === ex.messageType,
+      why: `mensagem ${type === "binary" ? "binária" : "de texto"} (esperado ${ex.messageType})`,
+    });
+  }
+  if (ex.size) {
+    out.push({
+      label: `tamanho ${ex.size.label}`,
+      ok: ex.size.test(true, m.data.length),
+      why: `tamanho ${ex.size.label} (recebido: ${m.data.length} bytes)`,
+    });
+  }
+  if (ex.hex) {
+    const hex = m.data.toString("hex");
+    out.push({
+      label: `hex ${ex.hex.label}`,
+      ok: ex.hex.test(true, hex),
+      why: `hex ${ex.hex.label} (recebido: ${hex.length > 64 ? `${hex.slice(0, 64)}…` : hex})`,
+    });
+  }
+  return out;
 }

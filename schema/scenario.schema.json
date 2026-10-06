@@ -328,7 +328,7 @@
               },
               "script": {
                 "type": "array",
-                "description": "Ações em ordem: send | sendJson | expect (+ extract) | sleep",
+                "description": "Ações em ordem: send | sendJson | sendBinary | expect (+ extract) | sleep",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -339,6 +339,24 @@
                     },
                     "sendJson": {
                       "description": "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)"
+                    },
+                    "sendBinary": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "description": "Mensagem binária: hex ou base64 (com templates) ou arquivo",
+                      "properties": {
+                        "hex": {
+                          "type": "string",
+                          "description": "Bytes em hex (espaços ignorados): \"ca fe ba be\""
+                        },
+                        "base64": {
+                          "type": "string"
+                        },
+                        "file": {
+                          "type": "string",
+                          "description": "Arquivo (relativo ao cenário), até 16MB"
+                        }
+                      }
                     },
                     "expect": {
                       "type": "object",
@@ -369,6 +387,18 @@
                           "type": "string",
                           "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
                           "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                        },
+                        "type": {
+                          "enum": ["text", "binary"],
+                          "description": "Tipo do quadro recebido"
+                        },
+                        "size": {
+                          "type": ["string", "number", "boolean", "null"],
+                          "description": "Tamanho em bytes (ex.: 16, \">= 4\")"
+                        },
+                        "hex": {
+                          "type": ["string", "number", "boolean", "null"],
+                          "description": "Conteúdo em hex minúsculo (ex.: \"cafebabe\", \"~^ca\")"
                         }
                       }
                     },
@@ -398,6 +428,10 @@
                           },
                           "header": {
                             "type": "string"
+                          },
+                          "bytes": {
+                            "enum": ["hex", "base64"],
+                            "description": "Corpo/mensagem inteiro codificado (ex.: para devolver bytes num sendBinary)"
                           },
                           "default": {}
                         }
@@ -513,6 +547,10 @@
                           },
                           "header": {
                             "type": "string"
+                          },
+                          "bytes": {
+                            "enum": ["hex", "base64"],
+                            "description": "Corpo/mensagem inteiro codificado (ex.: para devolver bytes num sendBinary)"
                           },
                           "default": {}
                         }
@@ -683,6 +721,10 @@
                 "header": {
                   "type": "string"
                 },
+                "bytes": {
+                  "enum": ["hex", "base64"],
+                  "description": "Corpo/mensagem inteiro codificado (ex.: para devolver bytes num sendBinary)"
+                },
                 "default": {}
               }
             }
@@ -833,7 +875,7 @@
                     },
                     "script": {
                       "type": "array",
-                      "description": "Ações em ordem: send | sendJson | expect (+ extract) | sleep",
+                      "description": "Ações em ordem: send | sendJson | sendBinary | expect (+ extract) | sleep",
                       "items": {
                         "type": "object",
                         "additionalProperties": false,
@@ -844,6 +886,24 @@
                           },
                           "sendJson": {
                             "description": "Mensagem JSON (templates; ${expr} sozinho preserva o tipo)"
+                          },
+                          "sendBinary": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "description": "Mensagem binária: hex ou base64 (com templates) ou arquivo",
+                            "properties": {
+                              "hex": {
+                                "type": "string",
+                                "description": "Bytes em hex (espaços ignorados): \"ca fe ba be\""
+                              },
+                              "base64": {
+                                "type": "string"
+                              },
+                              "file": {
+                                "type": "string",
+                                "description": "Arquivo (relativo ao cenário), até 16MB"
+                              }
+                            }
                           },
                           "expect": {
                             "type": "object",
@@ -874,6 +934,18 @@
                                 "type": "string",
                                 "pattern": "^\\s*(\\d+(\\.\\d+)?\\s*(ms|s|m|h)\\s*)+$",
                                 "x-erro": "duração inválida: use ms, s, m ou h (ex.: \"500ms\", \"30s\", \"1m30s\")"
+                              },
+                              "type": {
+                                "enum": ["text", "binary"],
+                                "description": "Tipo do quadro recebido"
+                              },
+                              "size": {
+                                "type": ["string", "number", "boolean", "null"],
+                                "description": "Tamanho em bytes (ex.: 16, \">= 4\")"
+                              },
+                              "hex": {
+                                "type": ["string", "number", "boolean", "null"],
+                                "description": "Conteúdo em hex minúsculo (ex.: \"cafebabe\", \"~^ca\")"
                               }
                             }
                           },
@@ -903,6 +975,10 @@
                                 },
                                 "header": {
                                   "type": "string"
+                                },
+                                "bytes": {
+                                  "enum": ["hex", "base64"],
+                                  "description": "Corpo/mensagem inteiro codificado (ex.: para devolver bytes num sendBinary)"
                                 },
                                 "default": {}
                               }
@@ -1018,6 +1094,10 @@
                                 },
                                 "header": {
                                   "type": "string"
+                                },
+                                "bytes": {
+                                  "enum": ["hex", "base64"],
+                                  "description": "Corpo/mensagem inteiro codificado (ex.: para devolver bytes num sendBinary)"
                                 },
                                 "default": {}
                               }
@@ -1187,6 +1267,10 @@
                       },
                       "header": {
                         "type": "string"
+                      },
+                      "bytes": {
+                        "enum": ["hex", "base64"],
+                        "description": "Corpo/mensagem inteiro codificado (ex.: para devolver bytes num sendBinary)"
                       },
                       "default": {}
                     }
