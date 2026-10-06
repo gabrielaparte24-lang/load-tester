@@ -135,3 +135,43 @@ function avgSteps(sc: Scenario): number {
   const w = sc.flows.reduce((s, f) => s + f.weight, 0);
   return w ? sc.flows.reduce((s, f) => s + f.weight * f.steps.length, 0) / w : 0;
 }
+
+/** Alvo fora da allowlist: exige --i-own-this-target (flag) e a confirmação do host. */
+export class TargetConfirmationRequired extends ConfigError {
+  constructor(
+    readonly target: TargetCheck,
+    readonly load: LoadSummary,
+    readonly needs: "flag" | "confirm" | "mismatch",
+  ) {
+    super(
+      needs === "mismatch"
+        ? `a confirmação não confere com o host "${target.host}"`
+        : `alvo "${target.host}" ${target.reason}. ${RESPONSIBLE_USE_NOTICE} ` +
+            (needs === "flag"
+              ? "Se o sistema é seu (ou há autorização por escrito), marque que é o dono do alvo e confirme o host."
+              : `Confirme digitando o host (${target.host}).`),
+    );
+  }
+}
+
+/**
+ * Versão não interativa da autorização (API/dashboard): aplica os tetos e, para alvos fora da
+ * allowlist, exige iOwnThisTarget E confirmTarget igual ao host.
+ */
+export async function authorizeRun(
+  sc: Scenario,
+  limits: Limits,
+  allowedTargets: readonly string[],
+  opts: { iOwnThisTarget?: boolean; confirmTarget?: string } = {},
+): Promise<{ load: LoadSummary; target: TargetCheck }> {
+  const load = enforceLimits(sc, limits);
+  const target = await checkTarget(sc.target.baseUrl, allowedTargets);
+  if (target.allowed) return { load, target };
+  if (!opts.iOwnThisTarget) throw new TargetConfirmationRequired(target, load, "flag");
+  if (opts.confirmTarget === undefined)
+    throw new TargetConfirmationRequired(target, load, "confirm");
+  if (opts.confirmTarget.trim().toLowerCase() !== target.host) {
+    throw new TargetConfirmationRequired(target, load, "mismatch");
+  }
+  return { load, target };
+}
